@@ -27,6 +27,7 @@ import HomePage from './pages/HomePage';
 import RecordPage from './pages/RecordPage';
 import InferencePage from './pages/InferencePage';
 import TrainingPage from './pages/TrainingPage';
+import HilSerlPage from './pages/HilSerlPage';
 import EditDatasetPage from './pages/EditDatasetPage';
 import { useRosTopicSubscription } from './hooks/useRosTopicSubscription';
 import rosConnectionManager from './utils/rosConnectionManager';
@@ -508,6 +509,18 @@ function App() {
             </span>
           </button>
 
+          <button
+            className={clsx(classPageButton, {
+              'bg-gray-300 dark:bg-slate-700': page === PageType.HIL_SERL,
+              'hover:bg-gray-200 dark:hover:bg-slate-800': page !== PageType.HIL_SERL,
+            })}
+            onClick={() => dispatch(moveToPage(PageType.HIL_SERL))}
+          >
+            <GoGraph size={28} className="mb-1.5" />
+            <span className="mt-1 text-center text-sm">HIL-SERL Lab</span>
+          </button>
+
+
         </div>
         </aside>
       )}
@@ -518,6 +531,8 @@ function App() {
           <RecordPage isActive={page === PageType.RECORD} />
         ) : page === PageType.INFERENCE ? (
           <InferencePage isActive={page === PageType.INFERENCE} />
+        ) : page === PageType.HIL_SERL ? (
+          <HilSerlPage />
         ) : page === PageType.TRAINING ? (
           <TrainingPage isActive={page === PageType.TRAINING} />
         ) : page === PageType.EDIT_DATASET ? (

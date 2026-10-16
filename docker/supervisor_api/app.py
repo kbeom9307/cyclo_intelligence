@@ -102,6 +102,8 @@ navigation_missions_router = _navigation_missions_module.router
 _bt_support_module = _load_sibling_module("bt_support", "bt_support.py")
 _bt_trees_module = _load_sibling_module("bt_trees", "bt_trees.py")
 bt_trees_router = _bt_trees_module.router
+_hilserl_module = _load_sibling_module("hilserl", "hilserl.py")
+hilserl_router = _hilserl_module.router
 
 
 logger = logging.getLogger("supervisor_api")
@@ -1158,7 +1160,10 @@ async def _app_lifespan(_app: FastAPI):
     # Stay subscribed before Nav2 starts. Its global costmap publishes one
     # full snapshot followed by incremental dirty rectangles.
     _navigation_module.ensure_ros_grid_subscriber_started()
-    yield
+    try:
+        yield
+    finally:
+        await asyncio.to_thread(_hilserl_module.shutdown)
 
 
 app = FastAPI(
@@ -1172,6 +1177,7 @@ _include_router_with_eager_routes(app, navigation_router)
 _include_router_with_eager_routes(app, navigation_spots_router)
 _include_router_with_eager_routes(app, navigation_missions_router)
 _include_router_with_eager_routes(app, bt_trees_router)
+_include_router_with_eager_routes(app, hilserl_router)
 
 
 @app.get("/health", response_model=HealthResponse)

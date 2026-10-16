@@ -1,0 +1,6 @@
+# torch and numpy are provided by the Cyclo ROS torch base image.
+# Pin transport API: the runtime subclasses bindings to restrict them to loopback.
+agentlace @ git+https://github.com/youliangtan/agentlace.git@76984f9b854b9ad88c78b3e5f0319e6e3c573e34
+# Preserve the ROS / torch image's NumPy 1.x ABI.
+numpy>=1.26,<2
+opencv-python>=4.8,<4.12

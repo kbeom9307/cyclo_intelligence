@@ -143,6 +143,7 @@ test('orders the Cyclo Intelligence navigation into workflow sections', () => {
     'Training Guide',
     'Inference',
     'Autonomy Studio',
+    'HIL-SERL Lab',
   ].map((name) => navigation.getByRole('button', { name }));
 
   pageButtons.slice(1).forEach((button, index) => {

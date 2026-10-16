@@ -11,6 +11,16 @@ Each process is split internally into multiple classes/modules.
 
 ---
 
+## HIL-SERL pre-robot Mock runtime
+
+HIL-SERL Lab uses the React UI, `docker/supervisor_api/hilserl.py` control plane,
+and `hilserl_runtime.py` CPU worker. The worker connects a toy XYZ peg environment,
+Actor, Agentlace replay/weight transport, intervention replay and SAC learner.
+It saves policy/dataset artifacts and supports deterministic evaluation.
+Isaac Sim and hardware adapters remain blocked. This state-based integration
+Mock is not upstream visual HIL-SERL or NIST physics. See
+[`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md#hil-serl-lab-pre-robot-mock-runtime).
+
 ## 1. Big Picture
 
 ```text

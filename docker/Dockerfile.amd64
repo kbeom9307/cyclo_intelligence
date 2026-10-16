@@ -179,7 +179,8 @@ RUN mkdir -p /var/log/orchestrator /var/log/cyclo_data /var/log/cyclo_intelligen
 
 COPY docker/supervisor_api /opt/supervisor_api
 RUN pip install --no-cache-dir --break-system-packages \
-        -r /opt/supervisor_api/requirements.txt
+        -r /opt/supervisor_api/requirements.txt \
+        -r /opt/supervisor_api/requirements-hilserl.txt
 
 RUN touch /run/nginx.pid && chown nobody:nogroup /run/nginx.pid
 

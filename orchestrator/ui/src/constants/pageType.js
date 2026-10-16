@@ -22,6 +22,7 @@ const PageType = {
   RECORD: 'record',
   INFERENCE: 'inference',
   TRAINING: 'training',
+  HIL_SERL: 'hil_serl',
   EDIT_DATASET: 'edit_dataset',
   AUTONOMY_STUDIO: 'autonomy_studio',
 };

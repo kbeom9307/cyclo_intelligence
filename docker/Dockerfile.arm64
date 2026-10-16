@@ -253,7 +253,8 @@ RUN mkdir -p /var/log/orchestrator /var/log/cyclo_data /var/log/cyclo_intelligen
 # 501 stubs until the §4.8 follow-up adds docker-py.
 COPY docker/supervisor_api /opt/supervisor_api
 RUN pip install --no-cache-dir --break-system-packages \
-        -r /opt/supervisor_api/requirements.txt
+        -r /opt/supervisor_api/requirements.txt \
+        -r /opt/supervisor_api/requirements-hilserl.txt
 
 # nginx must start from s6; disable the systemd daemon pidfile
 RUN touch /run/nginx.pid && chown nobody:nogroup /run/nginx.pid

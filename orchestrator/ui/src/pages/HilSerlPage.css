@@ -1,0 +1,53 @@
+.hil-page { --hil-panel: #fff; --hil-line: #dce3ed; --hil-muted: #59697c; --hil-soft: #f3f6fa; flex: 1; min-width: 0; overflow: auto; padding: 30px; color: #17283c; background: #f5f7fb; }
+.dark .hil-page { --hil-panel: #172231; --hil-line: #344354; --hil-muted: #a5b5c8; --hil-soft: #202f42; color: #e4edf7; background: #101925; }
+.hil-header { display: flex; justify-content: space-between; align-items: center; gap: 20px; margin-bottom: 22px; flex-wrap: wrap; }
+.hil-eyebrow { font-size: 11px; font-weight: 700; letter-spacing: 1.7px; color: var(--hil-muted); }
+.hil-page h1 { font-size: 30px; font-weight: 700; margin: 6px 0; }
+.hil-page h2 { font-size: 16px; font-weight: 650; margin: 0 0 12px; }
+.hil-header p, .hil-help { color: var(--hil-muted); font-size: 13px; line-height: 1.6; }
+.hil-help { margin: 10px 0 22px; }
+.hil-badge { padding: 7px 12px; font-size: 12px; font-weight: 600; background: var(--hil-soft); border: 1px solid var(--hil-line); border-radius: 20px; }
+.hil-banner { padding: 14px 18px; border-left: 3px solid #639cce; border-radius: 5px; background: var(--hil-soft); font-size: 13px; line-height: 1.6; }
+.hil-tabs { display: flex; gap: 6px; margin: 22px 0; }
+.hil-page button { border: 1px solid var(--hil-line); background: var(--hil-panel); border-radius: 7px; padding: 9px 14px; font-size: 13px; font-weight: 600; cursor: pointer; }
+.hil-page button:hover:not(:disabled) { border-color: #438cc7; }
+.hil-page button:focus-visible, .hil-page input:focus-visible, .hil-page select:focus-visible { outline: 2px solid #479cde; outline-offset: 2px; }
+.hil-page button:disabled { opacity: .5; cursor: not-allowed; }
+.hil-page button.hil-primary, .hil-tabs button[aria-pressed="true"] { background: #1768a6; color: white; border-color: #1768a6; }
+.hil-page button.hil-danger { color: #d45252; }
+.hil-layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 22px; align-items: start; }
+.hil-card { padding: 24px; border: 1px solid var(--hil-line); border-radius: 12px; background: var(--hil-panel); }
+.hil-card-heading { display: flex; justify-content: space-between; align-items: start; gap: 15px; margin-bottom: 16px; }
+.hil-card-heading > span { font-size: 12px; color: var(--hil-muted); }
+.hil-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; border: 0; padding: 0; margin: 0; }
+.hil-field { display: flex; flex-direction: column; gap: 7px; font-size: 12px; color: var(--hil-muted); }
+.hil-field input, .hil-field select { width: 100%; border: 1px solid var(--hil-line); border-radius: 6px; padding: 9px 10px; color: inherit; background: var(--hil-panel); font-size: 13px; min-height: 39px; }
+.hil-actions { display: flex; gap: 9px; flex-wrap: wrap; }
+.hil-stack { flex-direction: column; margin-top: 24px; }
+.hil-check { display: flex; gap: 10px; padding: 17px 0; border-bottom: 1px solid var(--hil-line); font-size: 13px; }
+.hil-check p { color: var(--hil-muted); font-size: 12px; margin-top: 4px; }
+.hil-dot { width: 8px; height: 8px; border-radius: 50%; background: #d9a246; margin-top: 5px; flex-shrink: 0; }
+.hil-error, .hil-notice { padding: 12px; margin: 14px 0; border: 1px solid var(--hil-line); border-radius: 6px; font-size: 13px; }
+.hil-error { color: #d45252; }
+.hil-notice { color: #21826e; }
+.hil-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.hil-metrics > div { padding: 14px; background: var(--hil-soft); border-radius: 8px; }
+.hil-metrics span { font-size: 11px; color: var(--hil-muted); display: block; }
+.hil-metrics strong { font-size: 25px; display: block; margin-top: 8px; }
+.hil-control { margin: 22px 0; border-top: 1px solid var(--hil-line); padding-top: 22px; display: flex; align-items: center; justify-content: space-between; gap: 15px; flex-wrap: wrap; }
+.hil-control p { font-size: 13px; color: var(--hil-muted); }
+.hil-events { max-height: 320px; overflow: auto; list-style: none; padding: 0; }
+.hil-events li { display: flex; gap: 15px; border-bottom: 1px solid var(--hil-line); padding: 12px 0; font-size: 12px; flex-wrap: wrap; }
+.hil-events time, .hil-events span { color: var(--hil-muted); }
+.hil-page .hil-history { display: flex; flex-direction: column; gap: 6px; text-align: left; width: 100%; margin-top: 12px; }
+.hil-history span { font-weight: 400; font-size: 11px; color: var(--hil-muted); }
+.hil-page .hil-history.selected { border-color: #438cc7; background: var(--hil-soft); }
+.hil-empty { padding: 30px 0; text-align: center; }
+.hil-empty p { margin: 14px 0; color: var(--hil-muted); }
+@media (max-width: 1100px) { .hil-layout { grid-template-columns: 1fr; } }
+@media (max-width: 650px) { .hil-page { padding: 16px; } .hil-fields { grid-template-columns: 1fr; } .hil-metrics { grid-template-columns: repeat(2, 1fr); } }
+
+.hil-page .hil-dot.ready { background: #16a34a; }
+.hil-mock-view svg { width: 100%; max-width: 360px; height: 180px; }
+.hil-mock-view code { overflow-wrap: anywhere; }
+.hil-page pre.hil-error { white-space: pre-wrap; overflow-wrap: anywhere; }
