@@ -1,6 +1,6 @@
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import HilSerlPage from './HilSerlPage';
-import { getHilWorkspace, saveHilConfig, createHilSession, sendHilCommand, sendHilAction } from '../utils/hilserlApi';
+import { getHilWorkspace, saveHilConfig, createHilSession, sendHilCommand, sendHilAction, checkHilLearner } from '../utils/hilserlApi';
 
 jest.mock('../utils/hilserlApi');
 jest.mock('./HilIsaacView', () => () => <div>Isaac live camera panel</div>);
@@ -27,8 +27,21 @@ test('shows disconnected runtime and never offers real training', async () => {
   render(<HilSerlPage />);
   expect(await screen.findByText('Runtime readiness')).toBeInTheDocument();
   expect(screen.getByRole('button', { name: /Create Isaac Sim training/ })).toBeDisabled();
-  expect(screen.getByText(/Mock runs a CPU SAC learner/)).toBeInTheDocument();
+  expect(screen.getByText(/Actor inference and SAC learning use the selected GPU devices/)).toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Create preview session' })).toBeEnabled();
+});
+
+test('restores upstream model, batch, replay and update settings without starting a session', async () => {
+  workspace.config = { ...config, learning_backend: 'legacy_torch', pixel_batch_size: 32, pixel_replay_capacity: 2048 };
+  render(<HilSerlPage />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore upstream HIL-SERL settings' }));
+  expect(screen.getByLabelText('Learning engine')).toHaveValue('hil_serl');
+  expect(screen.getByLabelText('Pixel batch size')).toHaveValue(256);
+  expect(screen.getByLabelText('Pixel replay capacity per buffer')).toHaveValue(200000);
+  expect(screen.getByLabelText('Discount factor')).toHaveValue(.97);
+  expect(screen.getByLabelText('Critic updates per actor update')).toHaveValue(2);
+  expect(screen.getByLabelText('head crop Left')).toHaveValue(0);
+  expect(createHilSession).not.toHaveBeenCalled();
 });
 
 test('saves config before allowing a preview with changed settings', async () => {
@@ -152,4 +165,140 @@ test('sends truncate for a paused unfinished episode', async () => {
   fireEvent.click(await screen.findByRole('button', { name: 'Session & history' }));
   fireEvent.click(screen.getByRole('button', { name: 'Truncated' }));
   await waitFor(() => expect(sendHilCommand).toHaveBeenCalledWith(expect.objectContaining({state:'paused'}), 'truncate'));
+});
+
+test('starts a fresh classifier collection after the previous collection stops', async () => {
+  const stopped = { ...session, mode: 'classifier', state: 'stopped' };
+  const fresh = { ...session, id: 'new-collection', mode: 'classifier' };
+  workspace.sessions = [stopped];
+  workspace.readiness.can_classifier = true;
+  createHilSession.mockImplementation(async () => {
+    workspace.sessions = [fresh, stopped];
+    return fresh;
+  });
+  sendHilCommand.mockImplementation(async (current) => {
+    workspace.sessions = [{ ...current, state: 'running' }, stopped];
+  });
+  render(<HilSerlPage />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Session & history' }));
+  expect(screen.getByRole('button', { name: 'Start Isaac Sim runtime' })).toBeEnabled();
+  fireEvent.click(screen.getByRole('button', { name: 'Start Isaac Sim runtime' }));
+  await waitFor(() => expect(sendHilCommand).toHaveBeenCalledWith(fresh, 'start'));
+  expect(createHilSession).toHaveBeenCalledWith(0, 'classifier');
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Start Isaac Sim runtime' })).toBeDisabled());
+  expect(workspace.sessions[1]).toBe(stopped);
+});
+
+test.each(['active', 'unready'])('does not restart classifier collection when %s', async (reason) => {
+  workspace.sessions = [{ ...session, mode: 'classifier', state: 'stopped' }];
+  workspace.readiness.can_classifier = reason !== 'unready';
+  if (reason === 'active') workspace.sessions.push({ ...session, id: 'other', state: 'running' });
+  render(<HilSerlPage />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Session & history' }));
+  expect(screen.getByRole('button', { name: 'Start Isaac Sim runtime' })).toBeDisabled();
+  expect(createHilSession).not.toHaveBeenCalled();
+});
+
+test('can retry Start on the newly created collection if runtime startup fails', async () => {
+  const stopped = { ...session, mode: 'classifier', state: 'stopped' };
+  const fresh = { ...session, id: 'retry-collection', mode: 'classifier' };
+  workspace.sessions = [stopped];
+  workspace.readiness.can_classifier = true;
+  createHilSession.mockImplementation(async () => {
+    workspace.sessions = [fresh, stopped];
+    return fresh;
+  });
+  sendHilCommand.mockRejectedValueOnce(new Error('Simulator unavailable')).mockResolvedValue({});
+  render(<HilSerlPage />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Session & history' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Start Isaac Sim runtime' }));
+  expect(await screen.findByRole('alert')).toHaveTextContent('Simulator unavailable');
+  fireEvent.click(screen.getByRole('button', { name: 'Start Isaac Sim runtime' }));
+  await waitFor(() => expect(sendHilCommand).toHaveBeenCalledTimes(2));
+  expect(sendHilCommand).toHaveBeenLastCalledWith(fresh, 'start');
+  expect(createHilSession).toHaveBeenCalledTimes(1);
+});
+
+test('demo collection screen includes task-scoped saved data management', async () => {
+  workspace.sessions = [{...session, mode:'demo', state:'paused', episode_outcome:'success', runtime:{collection:{saved_demo_episodes:1,pending_demo_steps:0}}}];
+  workspace.data_library = [{session_id:'test',kind:'demo',task:config,episodes:1,steps:12,files:[{name:'episode-00001.npz',episode:1,steps:12}]}];
+  render(<HilSerlPage />);
+  fireEvent.click(await screen.findByRole('button',{name:'Session & history'}));
+  expect(screen.getByRole('region',{name:'Demo data management'})).toHaveTextContent('1 episodes / 12 steps');
+  expect(screen.getByText(/Success pauses the episode for review/)).toBeInTheDocument();
+  expect(screen.getByRole('button',{name:'Save successful demo'})).toBeDisabled();
+  expect(screen.getByRole('button',{name:'Delete selected demos'})).toBeDisabled();
+  expect(screen.getByRole('button',{name:'Reset episode'})).toBeEnabled();
+});
+
+test('stops demo, combines two sources, saves settings and creates training without starting it', async () => {
+  const {combineHilDemos}=require('../utils/hilserlApi');
+  const order=[];
+  let stoppedPolls=0;
+  getHilWorkspace.mockImplementation(async () => {
+    if (order.includes('stop') && ++stoppedPolls >= 2) workspace.sessions=workspace.sessions.map(item=>item.id==='test'?{...item,runtime_pending:false,runtime:{artifacts_saved:true}}:item);
+    return workspace;
+  });
+  workspace.sessions=[{...session,mode:'demo',state:'paused',runtime:{collection:{pending_demo_steps:4}}},{...session,id:'second',mode:'demo',state:'stopped'}];
+  workspace.data_library=['test','second'].map(session_id=>({session_id,kind:'demo',task:config,files:[{episode:1,steps:1250,name:'episode-00001.npz'}]}));
+  sendHilCommand.mockImplementation(async (item,action)=>{
+    order.push(action);
+    workspace.sessions=workspace.sessions.map(value=>value.id===item.id?{...value,state:'stopped',runtime_pending:true,runtime:{artifacts_saved:false}}:value);
+  });
+  combineHilDemos.mockImplementation(async selections=>{
+    order.push('combine');
+    expect(workspace.sessions.every(item=>item.state==='stopped')).toBe(true);
+    expect(workspace.sessions[0].runtime.artifacts_saved).toBe(true);
+    return {path:'/workspace/hilserl/demo_exports/chosen.npz',cameras:['head'],steps:2500,episodes:2,task:{environment:'isaac_sim',robot_type:'ffw_sg2_rev1',arm:'right',target_part:'peg_round_8'}};
+  });
+  saveHilConfig.mockImplementation(async config=>{
+    order.push('save');workspace={...workspace,config,revision:1};return {config,revision:1};
+  });
+  createHilSession.mockImplementation(async (revision,mode)=>{
+    order.push('create');const item={...session,id:'training',mode,config:workspace.config};workspace.sessions=[item,...workspace.sessions];return item;
+  });
+  render(<HilSerlPage />);
+  fireEvent.click(await screen.findByRole('button',{name:'Session & history'}));
+  fireEvent.click(screen.getByRole('button',{name:'Select all demos'}));
+  expect(screen.getByText('Selected 2 demos from 2 sources · 2500 steps')).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button',{name:'Apply demos to training settings'}));
+  await waitFor(()=>expect(createHilSession).toHaveBeenCalledWith(1,'train'));
+  expect(order).toEqual(['stop','combine','save','create']);
+  expect(combineHilDemos).toHaveBeenCalledWith([{session_id:'test',episodes:[1]},{session_id:'second',episodes:[1]}]);
+  expect(saveHilConfig).toHaveBeenCalledWith(expect.objectContaining({demonstration_path:'/workspace/hilserl/demo_exports/chosen.npz',observation_cameras:['head'],pixel_replay_capacity:2500}),0);
+  expect(sendHilCommand).toHaveBeenCalledTimes(1);
+  expect(await screen.findByText(/Training session created with 2 demos from 2 sources/)).toBeInTheDocument();
+  expect(screen.getByRole('button',{name:'Start Isaac Sim runtime'})).toBeEnabled();
+});
+
+test('failed demo stop does not combine, save settings or create training', async () => {
+  const {combineHilDemos}=require('../utils/hilserlApi');
+  workspace.sessions=[{...session,mode:'demo',state:'paused'}];
+  workspace.data_library=[{session_id:'test',kind:'demo',task:config,files:[{episode:1,steps:12,name:'episode-00001.npz'}]}];
+  sendHilCommand.mockRejectedValue(new Error('Stop failed'));
+  render(<HilSerlPage />);
+  fireEvent.click(await screen.findByRole('button',{name:'Session & history'}));
+  fireEvent.click(screen.getByRole('button',{name:'Select all demos'}));
+  fireEvent.click(screen.getByRole('button',{name:'Apply demos to training settings'}));
+  expect(await screen.findByRole('alert')).toHaveTextContent('Stop failed');
+  expect(combineHilDemos).not.toHaveBeenCalled();
+  expect(saveHilConfig).not.toHaveBeenCalled();
+  expect(createHilSession).not.toHaveBeenCalled();
+});
+
+
+test('configures external GPU learner and checks the selected endpoint', async () => {
+  checkHilLearner.mockResolvedValue({connected: true, busy: false, gpus: [{device: 'cuda:1', name: 'Remote GPU'}]});
+  saveHilConfig.mockImplementation(async value => { workspace={...workspace,config:value,revision:1}; return workspace; });
+  render(<HilSerlPage />);
+  fireEvent.change(await screen.findByLabelText('Actor device'), {target:{value:'cuda:0'}});
+  fireEvent.change(screen.getByLabelText('Learner location'), {target:{value:'remote'}});
+  fireEvent.change(screen.getByLabelText('Learner device'), {target:{value:'cuda:1'}});
+  fireEvent.change(screen.getByLabelText('External learner URL'), {target:{value:'https://learner.example.com'}});
+  fireEvent.change(screen.getByLabelText('Local learner token file'), {target:{value:'/workspace/hilserl/learner-token'}});
+  fireEvent.click(screen.getByRole('button', {name:'Test learner connection'}));
+  expect(await screen.findByText(/Learner connected · Remote GPU/)).toBeInTheDocument();
+  expect(checkHilLearner).toHaveBeenCalledWith(expect.objectContaining({learner_placement:'remote',learner_device:'cuda:1',actor_device:'cuda:0'}));
+  fireEvent.click(screen.getByRole('button', {name:'Save configuration'}));
+  await waitFor(()=>expect(saveHilConfig).toHaveBeenCalledWith(expect.objectContaining({learner_url:'https://learner.example.com'}),0));
 });

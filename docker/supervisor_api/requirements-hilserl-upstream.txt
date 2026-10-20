@@ -1,0 +1,14 @@
+# Separate venv: preserve the ROS/PyTorch environment and its CUDA dependencies.
+# JAX 0.6.2 supports this host's Blackwell GPU; network/loss code remains upstream.
+jax[cuda12]==0.6.2
+flax==0.10.7
+optax==0.2.5
+chex==0.1.89
+distrax==0.1.5
+orbax-checkpoint==0.11.13
+tensorflow-probability==0.25.0
+numpy>=1.26,<2
+einops==0.8.2
+gymnasium==0.29.1
+nvidia-cudnn-cu12==9.27.0.42
+nvidia-cuda-nvcc-cu12==12.9.86

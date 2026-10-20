@@ -7,6 +7,7 @@ import numpy as np
 import torch
 from torch import nn
 from torch.distributions import Normal
+from hilserl_devices import resolve_device
 
 CAMERAS = ['head', 'left_wrist', 'right_wrist']
 IMAGE_SHAPE = (9, 64, 64)
@@ -63,17 +64,20 @@ class PixelQ(nn.Module):
 class PixelSAC:
     def __init__(self, config, observation_dim=22, action_dim=6):
         self.config = config
+        self.device = resolve_device(config.get('learner_device', 'cpu'))
         self.policy = PixelPolicy(observation_dim, action_dim)
         self.q1, self.q2 = [PixelQ(observation_dim, action_dim) for _ in range(2)]
+        self.policy.to(self.device)
+        self.q1.to(self.device); self.q2.to(self.device)
         self.targets = [copy.deepcopy(q) for q in (self.q1, self.q2)]
         self.qopt = torch.optim.Adam(list(self.q1.parameters()) + list(self.q2.parameters()), lr=config['learning_rate'])
         self.popt = torch.optim.Adam(self.policy.parameters(), lr=config['learning_rate'])
         self.steps = 0
 
     def update(self, rows):
-        obs, act, reward, nxt, terminal = [torch.as_tensor(np.stack([r[k] for r in rows]), dtype=torch.float32)
+        obs, act, reward, nxt, terminal = [torch.as_tensor(np.stack([r[k] for r in rows]), dtype=torch.float32, device=self.device)
                                           for k in ('observation', 'action', 'reward', 'next_observation', 'terminal')]
-        images, next_images = [torch.as_tensor(np.stack([r[k] for r in rows])) for k in ('images', 'next_images')]
+        images, next_images = [torch.as_tensor(np.stack([r[k] for r in rows]), device=self.device) for k in ('images', 'next_images')]
         with torch.no_grad():
             next_action, logp = self.policy.sample(nxt, images=next_images)
             target = reward[:, None] + self.config['discount'] * (1 - terminal[:, None]) * (
@@ -102,7 +106,7 @@ class SuccessClassifier(nn.Module):
         return self.head(self.encoder(images)).squeeze(-1)
 
     @classmethod
-    def load(cls, path):
+    def load(cls, path, device='cpu'):
         model = cls()
         with np.load(path, allow_pickle=False) as data:
             if str(data['__schema__']) != CLASSIFIER_SCHEMA:
@@ -111,8 +115,12 @@ class SuccessClassifier(nn.Module):
             if not all(torch.isfinite(v).all() for v in weights.values()):
                 raise ValueError('Non-finite classifier weights')
             model.load_state_dict(weights, strict=True)
-        return model.eval()
+        return model.to(resolve_device(device)).eval()
+
+    def predict(self, images):
+        with torch.no_grad():
+            logit = self(torch.as_tensor(images, device=next(self.parameters()).device)[None])[0]
+            return float(logit), float(logit.sigmoid())
 
     def probability(self, images):
-        with torch.no_grad():
-            return float(self(torch.as_tensor(images)[None]).sigmoid()[0])
+        return self.predict(images)[1]

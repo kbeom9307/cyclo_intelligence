@@ -47,3 +47,19 @@ test('offers native ultra resolution only for Overview', async () => {
   expect(localStorage.getItem('hil-camera-quality-spectator')).toBe('ultra');
   expect(selectors[1]).toHaveValue('standard');
 });
+
+test('closing a camera releases its view and persists until reopened', async () => {
+  const {unmount}=render(<HilIsaacView />);
+  await screen.findAllByAltText(/Live Isaac simulation/);
+  fireEvent.click(screen.getByRole('button',{name:'Close Overview'}));
+  expect(screen.queryByRole('region',{name:'Overview live view'})).toBeNull();
+  expect(screen.getByRole('button',{name:'Open Overview'})).toBeInTheDocument();
+  expect(JSON.parse(localStorage.getItem('hil-closed-cameras'))).toContain('spectator');
+  expect(URL.revokeObjectURL).toHaveBeenCalled();
+  unmount(); global.fetch.mockClear();
+  render(<HilIsaacView />);
+  await screen.findAllByAltText(/Live Isaac simulation/);
+  expect(global.fetch.mock.calls.some(([url])=>url.includes('camera=spectator'))).toBe(false);
+  fireEvent.click(screen.getByRole('button',{name:'Open Overview'}));
+  await waitFor(()=>expect(global.fetch.mock.calls.some(([url])=>url.includes('camera=spectator'))).toBe(true));
+});

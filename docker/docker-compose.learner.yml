@@ -1,0 +1,36 @@
+# On the external GPU server, from the repository root:
+#   mkdir -p docker/workspace/hilserl
+#   python3 -c 'import secrets; from pathlib import Path; p=Path("docker/workspace/hilserl/learner-token"); p.touch(mode=0o600, exist_ok=False); p.write_text(secrets.token_urlsafe(48))'
+#   docker compose -f docker/docker-compose.learner.yml up -d --build
+#
+# On the actor machine, copy that token into docker/workspace/hilserl/learner-token
+# (chmod 600), then open an SSH tunnel:
+#   ssh -N -L 7130:127.0.0.1:7130 user@learner-server
+# UI: Learner location = External GPU server, URL = http://127.0.0.1:7130,
+# Actor device = cuda:0, Learner device = cuda:0. Save, then create a NEW session.
+# The local token file shown in the UI is /workspace/hilserl/learner-token.
+# Demos are sent automatically; full learner.msgpack and disk-backed replay remain on the server.
+# Only policy.npz is copied back to the actor session at Stop.
+# For direct HTTPS, run hilserl_learner_server.py with --host and TLS cert/key flags.
+name: cyclo_hil_learner
+services:
+  learner:
+    image: cyclo-hil-learner:local
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.hil-learner
+    network_mode: host
+    environment:
+      CYCLO_HIL_LEARNER_TOKEN_FILE: /run/secrets/learner-token
+      CYCLO_HIL_LEARNER_DATA_DIR: /workspace/learner
+    volumes:
+      - ./workspace/learner:/workspace/learner
+      - ./workspace/hilserl/learner-token:/run/secrets/learner-token:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: [gpu]
+    stop_grace_period: 320s
+    restart: unless-stopped

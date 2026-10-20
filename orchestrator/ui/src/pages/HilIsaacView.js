@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import HilOverviewCrop from './HilOverviewCrop';
 
 /** Latest-frame viewer: one request in flight, bounded memory, no physics commands. */
-function CameraView({ camera, label }) {
+function CameraView({ camera, label, onClose }) {
   const [enabled, setEnabled] = useState(true);
   const [quality, setQuality] = useState(() => {
     try { const saved = localStorage.getItem(`hil-camera-quality-${camera}`); return (camera === 'spectator' ? ['low','standard','high','ultra'] : ['low','standard','high']).includes(saved) ? saved : 'standard'; } catch (_) { return 'standard'; }
@@ -64,7 +64,7 @@ function CameraView({ camera, label }) {
   return <section className="hil-card hil-live-view" ref={container} aria-label={`${label} live view`}>
     <div className="hil-card-heading"><div><h2>{label}</h2></div>
       <div className="hil-actions"><button onClick={() => { setEnabled((value) => !value); setFrame(''); }}>{enabled ? 'Pause video' : 'Resume video'}</button>
-        <button onClick={fullscreen}>Fullscreen</button></div>
+        <button onClick={fullscreen}>Fullscreen</button><button aria-label={`Close ${label}`} onClick={onClose}>Close</button></div>
     </div>
     <label className="hil-quality">Quality<select aria-label={`${label} quality`} value={quality} onChange={event => { const value = event.target.value; setQuality(value); try { localStorage.setItem(`hil-camera-quality-${camera}`, value); } catch (_) {} }}>
       <option value="low">Low · {camera === 'spectator' ? '320×240' : '320×180'}</option>
@@ -79,9 +79,16 @@ function CameraView({ camera, label }) {
   </section>;
 }
 
+const CAMERAS = [['spectator', 'Overview'], ['head', 'Head camera'], ['left_wrist', 'Left eye-in-hand'], ['right_wrist', 'Right eye-in-hand']];
 export default function HilIsaacView() {
-  return <section aria-label="Isaac Sim live views"><p className="hil-help">Current simulator cameras, including while physics is paused. Historical sessions do not replay video. Preview quality is independent of the synchronized RGB observations used by pixel learning.</p><div className="hil-camera-grid">
-    {[['spectator', 'Overview'], ['head', 'Head camera'], ['left_wrist', 'Left eye-in-hand'], ['right_wrist', 'Right eye-in-hand']].map(([camera, label]) =>
-      <CameraView key={camera} camera={camera} label={label} />)}
-  </div></section>;
+  const [closed, setClosed] = useState(() => {
+    try { const value = JSON.parse(localStorage.getItem('hil-closed-cameras') || '[]'); return Array.isArray(value) ? value : []; } catch { return []; }
+  });
+  const updateClosed = value => { setClosed(value); try { localStorage.setItem('hil-closed-cameras', JSON.stringify(value)); } catch {} };
+  return <section aria-label="Isaac Sim live views"><p className="hil-help">Close unused views to stop video requests. Overview rendering resources are released after all viewers stop requesting it. Robot cameras remain available for learning.</p>
+    <div className="hil-actions">{CAMERAS.filter(([camera]) => closed.includes(camera)).map(([camera,label]) => <button key={camera} onClick={() => updateClosed(closed.filter(value => value !== camera))}>Open {label}</button>)}</div>
+    <div className="hil-camera-grid" style={{gridTemplateColumns:`repeat(${Math.max(1, CAMERAS.length-closed.filter(value=>CAMERAS.some(([camera])=>camera===value)).length)}, minmax(240px, 1fr))`}}>
+      {CAMERAS.filter(([camera]) => !closed.includes(camera)).map(([camera, label]) => <CameraView key={camera} camera={camera} label={label} onClose={() => updateClosed([...closed,camera])} />)}
+    </div>
+  </section>;
 }

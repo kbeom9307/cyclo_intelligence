@@ -1,12 +1,7 @@
-# Local no-GPU development override.
-#
-# container.sh automatically layers this file over docker-compose.yml.
-# It lets the main Cyclo UI/data container run on machines without the
-# NVIDIA Container Toolkit. Policy containers (lerobot/groot) still need GPU.
+# Local HIL-SERL execution uses NVIDIA GPUs for both actor and learner.
+# Keep the GPU reservation from docker-compose.yml. For an explicitly CPU-only
+# development host, additionally pass docker-compose.cpu.yml.
 services:
   cyclo_intelligence:
+    # This host uses Docker GPU device requests with runc (same as Isaac Sim).
     runtime: runc
-    deploy:
-      resources:
-        reservations:
-          devices: !reset []

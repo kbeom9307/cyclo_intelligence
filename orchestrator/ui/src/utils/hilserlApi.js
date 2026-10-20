@@ -33,3 +33,7 @@ export const sendHilClassifierLabel = (session, success) => request(`/sessions/$
 
 export const deleteHilDataset = (id, kind) => request(`/datasets/${encodeURIComponent(id)}/${kind}`, 'DELETE');
 export const deleteHilClassifier = id => request(`/classifiers/${encodeURIComponent(id)}`, 'DELETE');
+export const deleteHilDemoEpisodes = (id, episodes) => request(`/datasets/${encodeURIComponent(id)}/demo/delete-episodes`, 'POST', { episodes });
+export const combineHilDemos = selections => request('/datasets/demo/combine', 'POST', { selections });
+
+export const checkHilLearner = config => request('/learner/check', 'POST', config);

@@ -1,0 +1,8 @@
+# Optional CPU-only development override; HIL device fields must also use cpu.
+services:
+  cyclo_intelligence:
+    runtime: runc
+    deploy:
+      resources:
+        reservations:
+          devices: !reset []

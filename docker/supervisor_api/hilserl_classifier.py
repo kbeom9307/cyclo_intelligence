@@ -5,10 +5,13 @@ import sys
 import time
 import traceback
 import numpy as np
+from hilserl_profiles import prepare_jax_libraries
+prepare_jax_libraries()
 import torch
 from hilserl_pixels import SuccessClassifier, CLASSIFIER_SCHEMA, IMAGE_SHAPE
 from hilserl_data import write_npz
 from hilserl_cameras import CAMERAS, route
+from hilserl_profiles import upstream, image_shape, UPSTREAM_CLASSIFIER
 
 
 def status(folder, **values):
@@ -49,6 +52,8 @@ def train(folder):
     torch.manual_seed(request['seed'])
     rng = np.random.default_rng(request['seed'])
     cameras = request.get('cameras', CAMERAS)
+    restored = upstream(request)
+    expected_shape = image_shape(request)
     images, labels, groups, hashes = [], [], [], {}
     for directory in request['collections']:
         directory = Path(directory)
@@ -67,7 +72,7 @@ def train(folder):
             hashes[sample['image_hash']] = sample['label']
             with np.load(directory / 'classifier_samples' / f"{sample['id']}.npz", allow_pickle=False) as data:
                 value = data['images']
-                if value.shape != IMAGE_SHAPE or value.dtype != np.uint8 or int(data['label']) != sample['label']:
+                if value.shape != expected_shape or value.dtype != np.uint8 or int(data['label']) != sample['label']:
                     raise ValueError('Invalid classifier sample')
                 images.append(route(value, cameras))
             labels.append(sample['label'])
@@ -77,10 +82,23 @@ def train(folder):
         raise ValueError('Collect at least 10 unique success and 10 unique failure images before training')
     train_ids, valid_ids = split_groups(labels, groups, request['seed'])
     images = np.stack(images)
-    model = SuccessClassifier()
-    optimizer = torch.optim.Adam(model.parameters(), lr=.0003)
+    if restored:
+        from hilserl_upstream import UpstreamClassifier
+        # Offline classifier training stays on CPU to leave the simulator GPU
+        # available. Its model, batch, augmentation and optimizer match upstream.
+        model = UpstreamClassifier(cameras, request.get('device', 'cpu'), request['seed'])
+    else:
+        model = SuccessClassifier()
+        optimizer = torch.optim.Adam(model.parameters(), lr=.0003)
+    batch_size = 256 if restored else 32
+    def predict(ids):
+        if restored:
+            logits = np.concatenate([model.logits(images[ids[i:i+batch_size]]) for i in range(0, len(ids), batch_size)])
+            return 1. / (1. + np.exp(-np.clip(logits, -80, 80)))
+        with torch.no_grad():
+            return torch.cat([model(torch.as_tensor(images[ids[i:i+32]])).sigmoid() for i in range(0, len(ids), 32)]).numpy()
     classes = [train_ids[labels[train_ids] == value] for value in (0, 1)]
-    status(folder, state='training', train_samples=len(train_ids), validation_samples=len(valid_ids),
+    status(folder, state='training', learning_backend=request.get('learning_backend', 'legacy_torch'), batch_size=batch_size, device='cpu', train_samples=len(train_ids), validation_samples=len(valid_ids),
            positive_samples=int(labels.sum()), negative_samples=int(len(labels) - labels.sum()),
            train_groups=sorted(set(groups[i] for i in train_ids)), validation_groups=sorted(set(groups[i] for i in valid_ids)))
     best_score = (-1., float('-inf'))
@@ -88,20 +106,23 @@ def train(folder):
     history = []
     path = folder / 'classifier.npz'
     for epoch in range(request['epochs']):
-        model.train()
+        if not restored:
+            model.train()
         losses = []
-        for _ in range(max(1, int(np.ceil(len(train_ids) / 32)))):
-            ids = np.r_[rng.choice(classes[0], 16), rng.choice(classes[1], 16)]
-            logits = model(torch.as_tensor(images[ids]))
-            loss = torch.nn.functional.binary_cross_entropy_with_logits(logits, torch.as_tensor(labels[ids], dtype=torch.float32))
-            optimizer.zero_grad(); loss.backward(); optimizer.step()
-            losses.append(float(loss.detach()))
-        model.eval()
-        with torch.no_grad():
-            probabilities = torch.cat([model(torch.as_tensor(images[valid_ids[i:i+32]])).sigmoid() for i in range(0, len(valid_ids), 32)]).numpy()
+        for _ in range(max(1, int(np.ceil(len(train_ids) / batch_size)))):
+            ids = np.r_[rng.choice(classes[0], batch_size // 2), rng.choice(classes[1], batch_size // 2)]
+            if restored:
+                losses.append(model.train_batch(images[ids], labels[ids]))
+            else:
+                logits = model(torch.as_tensor(images[ids]))
+                loss = torch.nn.functional.binary_cross_entropy_with_logits(logits, torch.as_tensor(labels[ids], dtype=torch.float32))
+                optimizer.zero_grad(); loss.backward(); optimizer.step()
+                losses.append(float(loss.detach()))
+        if not restored:
+            model.eval()
+        probabilities = predict(valid_ids)
         measured = metrics(probabilities, labels[valid_ids], request['threshold'])
-        with torch.no_grad():
-            train_probabilities = torch.cat([model(torch.as_tensor(images[train_ids[i:i+32]])).sigmoid() for i in range(0, len(train_ids), 32)]).numpy()
+        train_probabilities = predict(train_ids)
         train_metrics = metrics(train_probabilities, labels[train_ids], request['threshold'])
         record = {'epoch': epoch + 1, 'loss': float(np.mean(losses)), **measured,
                   'train_balanced_accuracy': train_metrics['balanced_accuracy']}
@@ -110,9 +131,10 @@ def train(folder):
         if score > best_score:
             best_score = score
             best = dict(record)
-            write_npz(path, __schema__=np.array(CLASSIFIER_SCHEMA), __task__=np.array(json.dumps(request['task'], sort_keys=True)),
+            write_npz(path, __schema__=np.array(UPSTREAM_CLASSIFIER if restored else CLASSIFIER_SCHEMA), __task__=np.array(json.dumps(request['task'], sort_keys=True)),
                       __cameras__=np.array(json.dumps(cameras)),
-                      **{k: v.detach().numpy() for k, v in model.state_dict().items()})
+                      __crops__=np.array(json.dumps(request.get('camera_crops', {}), sort_keys=True)),
+                      **(model.export() if restored else {k: v.detach().numpy() for k, v in model.state_dict().items()}))
         status(folder, **record, threshold=request['threshold'], best_epoch=best['epoch'],
                best_metrics=best, history=history)
     warnings = []

@@ -21,7 +21,11 @@ def route(images, cameras):
     return value
 
 
-def validate_artifact(data, cameras):
+def validate_artifact(data, cameras, config=None):
     saved = json.loads(str(data['__cameras__'])) if '__cameras__' in data else CAMERAS
     if saved != cameras:
         raise ValueError(f'Artifact cameras {saved} do not match selected cameras {cameras}')
+    if config is not None:
+        crops = json.loads(str(data['__crops__'])) if '__crops__' in data else {}
+        if crops != config.get('camera_crops', {}):
+            raise ValueError('Artifact camera crops differ from this environment; use matching crops or recollect data')

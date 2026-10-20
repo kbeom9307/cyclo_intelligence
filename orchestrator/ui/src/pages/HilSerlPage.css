@@ -121,3 +121,9 @@
 
 .hil-space-toggle { display: flex; align-items: center; gap: 8px; margin: 12px 0; }
 .hil-space-toggle input { width: auto; }
+.hil-learning-charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+.hil-learning-charts figure { margin: 0; min-width: 0; }
+.hil-learning-charts figcaption { font-weight: 600; margin: 8px 0; }
+.hil-metrics-table { max-height: 360px; overflow: auto; }
+.hil-metrics-table thead { position: sticky; top: 0; background: #f8fafc; }
+.hil-best-epoch { background: #eff6ff; }

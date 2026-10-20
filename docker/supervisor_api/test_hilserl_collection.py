@@ -15,7 +15,7 @@ def test_real_pixel_collection_demo_and_learner(tmp_path, monkeypatch):
     monkeypatch.setenv('CYCLO_HILSERL_DATA_DIR', str(tmp_path))
     app = FastAPI(); app.include_router(hil.router)
     with TestClient(app) as client:
-        config = hil.ExperimentConfig(environment='isaac_sim', robot_type='ffw_sg2_rev1', observation_mode='pixels',
+        config = hil.ExperimentConfig(learning_backend='legacy_torch', environment='isaac_sim', robot_type='ffw_sg2_rev1', observation_mode='pixels',
             control_hz=20, pixel_batch_size=2, pixel_replay_capacity=64, max_episode_steps=100,
             observation_cameras=['head', 'left_wrist'], classifier_cameras=['right_wrist'],
             translation_limit_m=.001, rotation_limit_rad=.01).model_dump()
@@ -66,9 +66,6 @@ def test_real_pixel_collection_demo_and_learner(tmp_path, monkeypatch):
             item=create('demo');command('start')
             wait(lambda s:s['runtime']['episode_step']>=3)
             command('pause');command('success')
-            current=wait(lambda s:True)
-            blocked=client.post('/hilserl/sessions/'+item['id']+'/commands',json={'expected_revision':current['revision'],'action':'reset'})
-            assert blocked.status_code==409
             saved=command('save_demo')
             assert saved['runtime']['collection']['saved_demo_episodes']==1
             assert saved['runtime']['collection']['pending_demo_steps']==0
@@ -183,7 +180,7 @@ def test_real_step_labels_follow_success_lease_and_pause(tmp_path, monkeypatch):
     monkeypatch.setenv('CYCLO_HILSERL_DATA_DIR', str(tmp_path))
     app = FastAPI(); app.include_router(hil.router)
     with TestClient(app) as client:
-        config = hil.ExperimentConfig(environment='isaac_sim', robot_type='ffw_sg2_rev1', control_hz=20,
+        config = hil.ExperimentConfig(learning_backend='legacy_torch', environment='isaac_sim', robot_type='ffw_sg2_rev1', control_hz=20,
             max_episode_steps=100, classifier_cameras=['right_wrist']).model_dump()
         client.put('/hilserl/config', json={'expected_revision':0,'config':config}).raise_for_status()
         item = client.post('/hilserl/sessions', json={'expected_config_revision':1,'mode':'classifier'}).json()

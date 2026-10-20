@@ -43,7 +43,7 @@ services:
   # ============================================================
   cyclo_intelligence:
     container_name: cyclo_intelligence
-    image: robotis/cyclo-intelligence:1.4.0
+    image: ${CYCLO_IMAGE:-robotis/cyclo-intelligence:1.4.0}
     build:
       context: ..
       dockerfile: docker/Dockerfile.${ARCH:-arm64}
@@ -128,6 +128,7 @@ services:
 
     privileged: true
     restart: unless-stopped
+    stop_grace_period: 320s
     runtime: nvidia
     healthcheck:
       test:

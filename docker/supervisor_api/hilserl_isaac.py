@@ -60,8 +60,8 @@ class IsaacNistEnv:
         self.images = None
         self.capture_metadata = None
         if self.pixel_mode:
-            from hilserl_pixels import PIXEL_SCHEMA
-            self.schema, self.observation_dim = PIXEL_SCHEMA, 22
+            from hilserl_profiles import pixel_schema
+            self.schema, self.observation_dim = pixel_schema(config), 22
         self.info = {}
         self._obs = None
         self.closed = False
@@ -85,7 +85,8 @@ class IsaacNistEnv:
         self._raw_obs = obs.copy()
         if self.pixel_mode:
             import base64, zlib
-            from hilserl_pixels import IMAGE_SHAPE, CAMERAS
+            from hilserl_profiles import image_shape, CAMERAS
+            IMAGE_SHAPE = image_shape(getattr(self, 'config', {}))
             pixels = result.get('pixels', {})
             if pixels.get('encoding') != 'zlib-uint8' or pixels.get('shape') != list(IMAGE_SHAPE) or pixels.get('cameras') != CAMERAS:
                 raise ValueError('Missing or incompatible synchronized pixel observation')

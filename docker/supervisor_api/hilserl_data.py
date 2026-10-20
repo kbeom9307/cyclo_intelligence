@@ -6,6 +6,7 @@ import time
 import uuid
 import numpy as np
 from hilserl_cameras import selected, route
+from hilserl_profiles import upstream
 
 FIELDS = ('observation', 'action', 'reward', 'next_observation', 'terminal', 'human', 'truncated')
 
@@ -29,6 +30,7 @@ def save_rows(path, rows, schema, config, pixel=False):
     fields = FIELDS + (('images', 'next_images') if pixel else ())
     write_npz(path, __schema__=np.array(schema), __task__=np.array(json.dumps(task_key(config), sort_keys=True)),
               __cameras__=np.array(json.dumps(selected(config, 'observation'))),
+              __crops__=np.array(json.dumps(config.get('camera_crops', {}), sort_keys=True)),
               **{key: np.stack([r[key] for r in rows]) for key in fields})
 
 
@@ -73,7 +75,8 @@ class Collection:
         write_npz(self.folder / 'classifier_samples' / f'{identifier}.npz', images=pixels, label=np.array(label))
         self.samples.append(item)
         self.last_capture = item
-        manifest = {'task': task_key(self.config), 'cameras': selected(self.config, 'classifier'), 'samples': self.samples, 'success_target': self.config.get('classifier_success_target', 200), 'target_reached': self.target_reached}
+        manifest = {'task': task_key(self.config), 'cameras': selected(self.config, 'classifier'), 'samples': self.samples, 'success_target': self.config.get('classifier_success_target', 200), 'target_reached': self.target_reached,
+                    'learning_backend': self.config.get('learning_backend', 'legacy_torch'), 'camera_crops': self.config.get('camera_crops', {})}
         target = self.folder / 'classifier_samples' / 'manifest.json'
         temporary = target.with_suffix('.tmp')
         temporary.write_text(json.dumps(manifest))
@@ -87,10 +90,15 @@ class Collection:
             raise ValueError('Demo collection limit reached (4,096 transitions); discard pending episode and stop')
         path = self.folder / 'demos' / f'episode-{episode:05d}.npz'
         # Mark the actual last transition, not an invented zero-action transition.
-        self.rows[-1].update(reward=10., terminal=True, truncated=False)
+        self.rows[-1].update(reward=1. if upstream(self.config) else 10., terminal=True, truncated=False)
         save_rows(path, self.rows, self.schema, self.config, pixel=True)
-        self.saved.append({'episode': episode, 'steps': len(self.rows), 'path': str(path)})
-        (self.folder / 'demos' / 'manifest.json').write_text(json.dumps({'episodes': self.saved, 'task': task_key(self.config), 'cameras': selected(self.config, 'observation')}))
+        saved = self.saved + [{'episode': episode, 'steps': len(self.rows), 'path': str(path)}]
+        manifest = self.folder / 'demos' / 'manifest.json'
+        temporary = manifest.with_suffix('.tmp')
+        temporary.write_text(json.dumps({'episodes': saved, 'task': task_key(self.config), 'cameras': selected(self.config, 'observation'),
+                                           'learning_backend': self.config.get('learning_backend', 'legacy_torch'), 'camera_crops': self.config.get('camera_crops', {})}))
+        temporary.replace(manifest)
+        self.saved = saved
         self.rows = []
         return path
 
@@ -103,8 +111,9 @@ class Collection:
         rows = []
         for episode in self.saved:
             with np.load(episode['path'], allow_pickle=False) as data:
-                for i in range(len(data['reward'])):
-                    rows.append({key: data[key][i] for key in FIELDS + ('images', 'next_images')})
+                arrays = {key: data[key] for key in FIELDS + ('images', 'next_images')}
+                for i in range(len(arrays['reward'])):
+                    rows.append({key: value[i] for key, value in arrays.items()})
         path = self.folder / 'demonstrations.npz'
         save_rows(path, rows, self.schema, self.config, pixel=True)
         return path

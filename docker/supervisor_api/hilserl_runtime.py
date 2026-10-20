@@ -1,11 +1,10 @@
-"""CPU learner/Actor runtime: SAC + Agentlace, with Mock or remote Isaac NIST environment.
+"""GPU actor and local/external SAC learner, with Mock or remote Isaac NIST environment.
 
-Actor and learner run on separate threads with Agentlace loopback transport.
+Actor control and learner/network work run on separate threads.
 Isaac physics lives in the simulator-owned bridge. Pixel mode trains multi-view
-CNN policies/critics; this local SAC is not an upstream HIL-SERL reproduction.
+the pinned upstream HIL-SERL JAX agent, or explicitly selected legacy PyTorch SAC.
 """
 from __future__ import annotations
-import copy
 import json
 import math
 import os
@@ -13,21 +12,20 @@ from pathlib import Path
 import random
 import sqlite3
 import sys
-import threading
 import time
 import traceback
-from collections import deque
 
 import numpy as np
+from hilserl_profiles import prepare_jax_libraries
+prepare_jax_libraries()
 import torch
-from torch import nn
-from torch.distributions import Normal
-from hilserl_pixels import PixelSAC, PixelPolicy, SuccessClassifier
+from hilserl_pixels import PixelPolicy, SuccessClassifier
+from hilserl_learning import SAC, Policy, Replay, LocalReply, LocalBroadcast
+from hilserl_devices import resolve_device, memory_status
+from hilserl_learner import AsyncLearner, make_spec
 from hilserl_data import Collection, save_rows, task_key
 from hilserl_cameras import selected, validate_artifact
-from agentlace import trainer
-from agentlace.data.data_store import QueuedDataStore
-from agentlace.internal.utils import make_compression_method
+from hilserl_profiles import upstream, image_shape
 import zmq
 
 
@@ -79,107 +77,6 @@ class MockPegEnv:
         return self.observation(), reward, success, self.steps >= self.c['max_episode_steps']
 
 
-def mlp(inputs, outputs):
-    return nn.Sequential(nn.Linear(inputs, 64), nn.ReLU(), nn.Linear(64, 64), nn.ReLU(), nn.Linear(64, outputs))
-
-
-class Policy(nn.Module):
-    def __init__(self, observation_dim=4, action_dim=3):
-        super().__init__()
-        self.net = mlp(observation_dim, action_dim * 2)
-
-    def sample(self, obs, deterministic=False):
-        mean, logstd = self.net(obs).chunk(2, dim=-1)
-        dist = Normal(mean, logstd.clamp(-5, 2).exp())
-        raw = mean if deterministic else dist.rsample()
-        action = raw.tanh()
-        logp = (dist.log_prob(raw) - torch.log(1 - action.square() + 1e-6)).sum(-1, keepdim=True)
-        return action, logp
-
-    def export(self):
-        return {key: value.detach().cpu().numpy().copy() for key, value in self.state_dict().items()}
-
-    def restore(self, weights):
-        self.load_state_dict({key: torch.as_tensor(value.copy()) for key, value in weights.items()}, strict=True)
-
-
-class SAC:
-    def __init__(self, config, observation_dim=4, action_dim=3):
-        self.config = config
-        self.policy = Policy(observation_dim, action_dim)
-        self.q1, self.q2 = mlp(observation_dim + action_dim, 1), mlp(observation_dim + action_dim, 1)
-        self.targets = [copy.deepcopy(self.q1), copy.deepcopy(self.q2)]
-        self.qopt = torch.optim.Adam(list(self.q1.parameters()) + list(self.q2.parameters()), lr=config['learning_rate'])
-        self.popt = torch.optim.Adam(self.policy.parameters(), lr=config['learning_rate'])
-        self.steps = 0
-
-    def update(self, rows):
-        obs, act, reward, nxt, terminal = [torch.as_tensor(np.stack([r[key] for r in rows]), dtype=torch.float32) for key in ('observation', 'action', 'reward', 'next_observation', 'terminal')]
-        reward, terminal = reward[:, None], terminal[:, None]
-        with torch.no_grad():
-            next_action, logp = self.policy.sample(nxt)
-            pair = torch.cat([nxt, next_action], -1)
-            target = reward + self.config['discount'] * (1 - terminal) * (torch.minimum(*(q(pair) for q in self.targets)) - .2 * logp)
-        pair = torch.cat([obs, act], -1)
-        qloss = sum((q(pair) - target).square().mean() for q in (self.q1, self.q2))
-        self.qopt.zero_grad(); qloss.backward(); self.qopt.step()
-        for q in (self.q1, self.q2):
-            q.requires_grad_(False)
-        sampled, logp = self.policy.sample(obs)
-        pair = torch.cat([obs, sampled], -1)
-        ploss = (.2 * logp - torch.minimum(self.q1(pair), self.q2(pair))).mean()
-        self.popt.zero_grad(); ploss.backward(); self.popt.step()
-        for q, target_q in zip((self.q1, self.q2), self.targets):
-            q.requires_grad_(True)
-            with torch.no_grad():
-                for target_p, param in zip(target_q.parameters(), q.parameters()):
-                    target_p.lerp_(param, .005)
-        self.steps += 1
-        return {'critic_loss': float(qloss.detach()), 'actor_loss': float(ploss.detach())}
-
-
-class Replay(QueuedDataStore):
-    def __init__(self, capacity):
-        super().__init__(capacity)
-        self.interventions = deque(maxlen=capacity)
-        self.sample_lock = threading.Lock()
-
-    def insert(self, row):
-        with self.sample_lock:
-            super().insert(row)
-            if row.get('human', False):
-                self.interventions.append(row)
-
-    def sample(self, size):
-        with self.sample_lock:
-            rows = list(self._data_queue)
-            demos = list(self.interventions)
-            count = size // 2 if demos else 0
-            return random.choices(demos, k=count) + random.choices(rows, k=size-count)
-
-
-# Upstream 0.1.4 binds all interfaces. Keep its protocol, but bind exclusively
-# to ephemeral loopback ports; Agentlace uses pickle and must remain local.
-class LocalReply(trainer.ReqRepServer):
-    def reset(self):
-        self.context = zmq.Context()
-        self.socket = self.context.socket(zmq.REP)
-        self.port = self.socket.bind_to_random_port('tcp://127.0.0.1')
-        self.socket.setsockopt(zmq.RCVTIMEO, 250)
-        self.socket.setsockopt(zmq.LINGER, 0)
-        self.is_kill = False
-
-
-class LocalBroadcast(trainer.BroadcastServer):
-    def __init__(self, port, **kwargs):
-        self.context = zmq.Context()
-        self.socket = self.context.socket(zmq.PUB)
-        self.socket.setsockopt(zmq.SNDHWM, 3)
-        self.socket.setsockopt(zmq.LINGER, 0)
-        self.port = self.socket.bind_to_random_port('tcp://127.0.0.1')
-        self.compress, _ = make_compression_method('lz4')
-
-
 def run(root, session_id, parent_pid=None):
     torch.set_num_threads(1)
     parent = parent_pid if parent_pid is not None else os.getppid()
@@ -188,7 +85,16 @@ def run(root, session_id, parent_pid=None):
     def session():
         with sqlite3.connect(root / 'control.sqlite3', timeout=10) as db:
             return json.loads(db.execute('SELECT body FROM documents WHERE id=?', ('session:' + session_id,)).fetchone()[0])
-    config = session()['config']
+    config = {'actor_device': 'cuda:0', 'learner_device': 'cuda:0', 'learner_placement': 'local', **session()['config']}
+    if upstream(config):
+        os.environ.setdefault('XLA_PYTHON_CLIENT_PREALLOCATE', 'false')
+        os.environ.setdefault('XLA_PYTHON_CLIENT_MEM_FRACTION', '.90')
+        # Inference autotuning can reserve several GiB for batch 1. Fixed
+        # kernels avoid that warmup allocation beside Isaac without changing
+        # model parameters or floating-point precision.
+        if session()['mode'] != 'train' or config['learner_placement'] == 'remote' or config['learner_device'] == 'cpu':
+            if '--xla_gpu_autotune_level' not in os.environ.get('XLA_FLAGS', ''):
+                os.environ['XLA_FLAGS'] = (os.environ.get('XLA_FLAGS', '') + ' --xla_gpu_autotune_level=0').strip()
     torch.manual_seed(config['seed']); random.seed(config['seed'])
     if config['environment'] == 'isaac_sim':
         from hilserl_isaac import IsaacNistEnv
@@ -206,29 +112,40 @@ def run(root, session_id, parent_pid=None):
 def train(root, session_id, parent, folder, config, env, session):
     mode = session()['mode']
     pixel = getattr(env, 'pixel_mode', False)
+    restored = pixel and upstream(config)
     passive = mode in ('preview', 'demo', 'classifier')
     collecting = mode in ('demo', 'classifier')
     collection = Collection(folder, config, mode, env.schema) if collecting else None
     batch_size = config.get('pixel_batch_size', 32) if pixel else config['batch_size']
     capacity = config.get('pixel_replay_capacity', 2048) if pixel else config['replay_capacity']
-    learner = (PixelSAC if pixel else SAC)(config, env.observation_dim, env.action_dim)
+    needs_classifier = config['reward_source'] == 'classifier' and mode not in ('preview', 'classifier')
+    actor_device = config.get('actor_device', 'cuda:0') if restored else (resolve_device(config.get('actor_device', 'cuda:0')) if not passive or needs_classifier else torch.device('cpu'))
+    initial_weights = None
+    backend = None
+    actor = None
     classifier = None
-    if config['reward_source'] == 'classifier' and not passive:
+    if needs_classifier:
         if not pixel:
             raise ValueError('Success classifier requires pixel observations')
         with np.load(config['classifier_path'], allow_pickle=False) as data:
-            validate_artifact(data, selected(config, 'classifier'))
+            validate_artifact(data, selected(config, 'classifier'), config)
             if json.loads(str(data['__task__'])) != task_key(config):
                 raise ValueError('Classifier task does not match this environment')
-        classifier = SuccessClassifier.load(config['classifier_path'])
+        if restored:
+            from hilserl_upstream import UpstreamClassifier
+            classifier = UpstreamClassifier.load(config['classifier_path'], device=actor_device)
+        else:
+            classifier = SuccessClassifier.load(config['classifier_path'], device=actor_device)
     classifier_hold = 0
     classifier_probability = None
+    classifier_logit = None
     if not passive and config['checkpoint_path']:
         with np.load(config['checkpoint_path'], allow_pickle=False) as data:
             if pixel:
-                validate_artifact(data, selected(config, 'observation'))
+                validate_artifact(data, selected(config, 'observation'), config)
             weights = dict(data)
             weights.pop('__cameras__', None)
+            weights.pop('__crops__', None)
             schema = str(weights.pop('__schema__', 'mock-xyz-state4-delta3-v1'))
             if schema != env.schema:
                 raise ValueError(f'Checkpoint schema {schema} does not match {env.schema}')
@@ -237,9 +154,9 @@ def train(root, session_id, parent, folder, config, env, session):
                 raise ValueError('Pixel policy task does not match this environment')
             if not all(np.isfinite(value).all() for value in weights.values()):
                 raise ValueError('Policy checkpoint contains non-finite weights')
-            learner.policy.restore(weights)
-    replay = Replay(capacity)
-    if not passive and config['demonstration_path']:
+            initial_weights = weights
+    demos = []
+    if mode == 'train' and config['demonstration_path']:
         with np.load(config['demonstration_path'], allow_pickle=False) as data:
             schema = str(data['__schema__']) if '__schema__' in data else 'mock-xyz-state4-delta3-v1'
             if schema != env.schema:
@@ -247,13 +164,13 @@ def train(root, session_id, parent, folder, config, env, session):
             if pixel and ('__task__' not in data or json.loads(str(data['__task__'])) != task_key(config)):
                 raise ValueError('Pixel demonstration task does not match this environment')
             if pixel:
-                validate_artifact(data, selected(config, 'observation'))
+                validate_artifact(data, selected(config, 'observation'), config)
             count = len(data['reward'])
             shapes = {'observation': (count, env.observation_dim), 'action': (count, env.action_dim), 'reward': (count,),
                       'next_observation': (count, env.observation_dim), 'terminal': (count,), 'human': (count,)}
             if pixel:
                 for key in ('images', 'next_images'):
-                    shapes[key] = (count, 9, 64, 64)
+                    shapes[key] = (count, *image_shape(config))
                     if key not in data or data[key].dtype != np.uint8:
                         raise ValueError('Pixel demonstrations require uint8 RGB observations')
             if 'truncated' in data:
@@ -265,49 +182,26 @@ def train(root, session_id, parent, folder, config, env, session):
                     raise ValueError(f'Invalid dataset field: {key}; expected {shape}, finite values')
             if np.abs(data['action']).max(initial=0) > 1:
                 raise ValueError('Dataset actions exceed [-1, 1]')
+            arrays = {key: data[key] for key in shapes}
             for i in range(count):
-                row = {key: data[key][i] for key in ('observation', 'action', 'reward', 'next_observation', 'terminal', 'human')}
+                row = {key: arrays[key][i] for key in ('observation', 'action', 'reward', 'next_observation', 'terminal', 'human')}
                 if pixel:
-                    row.update(images=data['images'][i], next_images=data['next_images'][i])
-                row['truncated'] = bool(data['truncated'][i]) if 'truncated' in data else False
-                replay.insert(row)
-    trainer.ReqRepServer, trainer.BroadcastServer = LocalReply, LocalBroadcast
-    transport = trainer.TrainerConfig()
-    server = trainer.TrainerServer(transport)
-    transport.port_number, transport.broadcast_port = server.req_rep_server.port, server.broadcast_server.port
-    server.register_data_store('actor', replay)
-    server.start(threaded=True)
-    queue = QueuedDataStore(min(capacity, 256) if pixel else 4096)
-    client = trainer.TrainerClient('actor', '127.0.0.1', transport, data_store=queue)
-    actor = (PixelPolicy if pixel else Policy)(env.observation_dim, env.action_dim); actor.restore(learner.policy.export())
-    mailbox, weight_lock = {}, threading.Lock()
-    def receive(message):
-        with weight_lock:
-            mailbox.update(message)
-    client.recv_network_callback(receive)
-    stop, learning = threading.Event(), threading.Event()
-    stats, stats_lock = {'learner_steps': 0, 'policy_version': 0}, threading.Lock()
-    errors = []
-    training_lock = threading.Lock()
-    def learn():
-        try:
-            while not stop.wait(.02):
-                if not learning.is_set() or len(replay) < batch_size:
-                    continue
-                with training_lock:
-                    if not learning.is_set():
-                        continue
-                    losses = learner.update(replay.sample(batch_size))
-                    if learner.steps % 5 == 0:
-                        server.publish_network({'weights': learner.policy.export(), 'version': learner.steps})
-                    with stats_lock:
-                        stats.update(losses, learner_steps=learner.steps)
-                    # Coalesce pending steps to bound CPU use.
-                    learning.clear()
-        except Exception:
-            errors.append(traceback.format_exc())
-            stop.set()
-    thread = threading.Thread(target=learn, daemon=True); thread.start()
+                    row.update(images=arrays['images'][i], next_images=arrays['next_images'][i])
+                row['truncated'] = bool(arrays['truncated'][i]) if 'truncated' in arrays else False
+                demos.append(row)
+    if not passive:
+        if restored:
+            from hilserl_upstream import UpstreamPolicy
+            actor = UpstreamPolicy(config, env.observation_dim, env.action_dim)
+        else:
+            actor = (PixelPolicy if pixel else Policy)(env.observation_dim, env.action_dim).to(actor_device).eval()
+        if initial_weights:
+            actor.restore(initial_weights)
+    if mode == 'train':
+        backend = AsyncLearner(config, make_spec(config, env), folder, initial_weights, demos, env.heartbeat)
+        _, weights = backend.snapshot()
+        actor.restore(weights)
+    del demos
     steps = completed = successes = human_steps = 0
     episode_step = 0
     version = 0
@@ -319,9 +213,9 @@ def train(root, session_id, parent, folder, config, env, session):
     log = (folder / 'transitions.jsonl').open('a')
     status = {}
     def prepare_episode():
-        nonlocal last_row, classifier_hold, classifier_probability
+        nonlocal last_row, classifier_hold, classifier_probability, classifier_logit
         last_row = None
-        classifier_hold, classifier_probability = 0, None
+        classifier_hold, classifier_probability, classifier_logit = 0, None, None
         if collection:
             collection.rows = []
             collection.done = False
@@ -338,9 +232,8 @@ def train(root, session_id, parent, folder, config, env, session):
             control = session()
             env.heartbeat()
             if control['state'] != 'running':
-                learning.clear()
-                with training_lock:
-                    pass  # Acknowledge pause only after an in-flight optimizer step.
+                if backend:
+                    backend.pause(env.heartbeat)
             events = [e for e in control['events'] if e['sequence'] > last_revision]
             for event in events:
                 if event['action'] == 'reset':
@@ -366,28 +259,29 @@ def train(root, session_id, parent, folder, config, env, session):
                     success = event['action'] == 'success'
                     truncated = event['action'] == 'truncate'
                     row = {'observation': obs.copy(), 'action': np.zeros(env.action_dim, dtype=np.float32),
-                           'reward': 0. if truncated else (10. if success else -10.), 'next_observation': obs.copy(),
+                           'reward': (float(success) if restored else (0. if truncated else (10. if success else -10.))), 'next_observation': obs.copy(),
                            'terminal': not truncated, 'truncated': truncated, 'human': True, 'label_only': True,
                            'episode': episode, 'policy_version': version}
                     if pixel:
                         row.update(images=env.images.copy(), next_images=env.images.copy())
-                    queue.insert(row)
+                    if backend:
+                        backend.insert(row)
                     log.write(json.dumps({k: v.tolist() if isinstance(v, np.ndarray) else v for k, v in row.items() if k not in ('images', 'next_images')}) + '\n')
                     completed += 1; successes += int(success)
             last_revision = control['revision']
             if control['state'] == 'stopped':
                 break
-            if errors:
-                raise RuntimeError(errors[0])
-            with weight_lock:
-                if mailbox.get('version', 0) > version:
-                    actor.restore(mailbox['weights']); version = mailbox['version']
+            if backend:
+                learner_status, weights = backend.snapshot()
+                if learner_status.get('version', 0) > version:
+                    actor.restore(weights); version = learner_status['version']
             if control['state'] == 'running' and not (collection and collection.target_reached):
                 manual = control.get('manual_action', {})
                 human = time.time() < manual.get('expires_at', 0) and any(manual.get('value', []))
                 with torch.no_grad():
                     proposed = (np.zeros(env.action_dim, dtype=np.float32) if passive else
-                                actor.sample(torch.as_tensor(obs)[None], deterministic=mode == 'evaluate', **({'images': torch.as_tensor(env.images)[None]} if pixel else {}))[0][0].numpy())
+                                actor.action(obs, env.images, deterministic=mode == 'evaluate') if restored else
+                                actor.sample(torch.as_tensor(obs, dtype=torch.float32, device=actor_device)[None], deterministic=mode == 'evaluate', **({'images': torch.as_tensor(env.images, device=actor_device)[None]} if pixel else {}))[0][0].cpu().numpy())
                 if human:
                     action = np.array(manual['value'], dtype=np.float32)
                     if config['environment'] == 'isaac_sim':
@@ -404,14 +298,16 @@ def train(root, session_id, parent, folder, config, env, session):
                         truncated = True
                         collection.error = 'Collection limit reached (10,000 samples); stop and start a new collection'
                 if classifier is not None:
-                    classifier_probability = classifier.probability(env.classifier_images)
+                    classifier_logit, classifier_probability = classifier.predict(env.classifier_images)
                     classifier_hold = classifier_hold + 1 if classifier_probability >= config['classifier_threshold'] else 0
                     detected = classifier_hold >= config['classifier_hold_steps']
                     terminal = detected or bool(env.info.get('is_failure', False))
-                    reward = 10. if detected else (-10. if env.info.get('is_failure', False) else 0.)
+                    reward = float(detected) if restored else (10. if detected else (-10. if env.info.get('is_failure', False) else 0.))
                     env.info['classifier_success'] = detected
                 if config['reward_source'] == 'human':
                     reward, terminal = 0., bool(env.info.get('is_failure', False))
+                elif restored and config['reward_source'] == 'environment':
+                    reward = float(bool(env.info.get('is_success', False)))
                 row = {'observation': obs.copy(), 'action': action.copy(), 'reward': reward,
                        'next_observation': nxt.copy(), 'terminal': bool(terminal), 'truncated': bool(truncated),
                        'human': human, 'label_only': False, 'episode': episode, 'policy_version': version,
@@ -422,14 +318,15 @@ def train(root, session_id, parent, folder, config, env, session):
                 if mode == 'demo':
                     row['human'] = True
                     collection.rows.append(row)
-                if not collecting:
-                    queue.insert(row)
+                if backend:
+                    backend.insert(row)
                 log.write(json.dumps({k: v.tolist() if isinstance(v, np.ndarray) else v for k, v in row.items() if k not in ('images', 'next_images')}) + '\n')
                 last_row = row
                 obs = nxt; steps += 1; episode_step += 1; human_steps += int(human)
                 if terminal or truncated:
                     if collecting:
-                        completed += 1; successes += int(env.info.get('is_success', False))
+                        collection_success = bool(env.info.get('classifier_success', False) if classifier is not None else env.info.get('is_success', False))
+                        completed += 1; successes += int(collection_success)
                         # Pause at the boundary for capture/episode review. Do not auto-reset demonstrations.
                         collection.done = True
                         with sqlite3.connect(root / 'control.sqlite3', timeout=10) as db:
@@ -439,7 +336,7 @@ def train(root, session_id, parent, folder, config, env, session):
                                 current['state'] = 'paused'
                                 current['manual_action'] = {}
                                 current['classifier_label'] = {}
-                                current['episode_outcome'] = 'success' if env.info.get('is_success') else ('failure' if terminal else 'truncated')
+                                current['episode_outcome'] = 'success' if collection_success else ('failure' if terminal else 'truncated')
                                 current['revision'] += 1
                                 current['events'].append({'sequence': current['revision'], 'action': 'collection_boundary', 'episode': episode, 'at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), 'preview': False})
                                 db.execute('UPDATE documents SET body=? WHERE id=?', (json.dumps(current), 'session:' + session_id))
@@ -461,17 +358,13 @@ def train(root, session_id, parent, folder, config, env, session):
                         db.execute('UPDATE documents SET body=? WHERE id=?', (json.dumps(current), 'session:' + session_id))
                 control = session()
                 last_revision = control['revision']
-            if not client.update():
-                raise RuntimeError('Agentlace replay transfer failed')
-            if mode == 'train' and control['state'] == 'running':
-                learning.set()
-            else:
-                learning.clear()
-            with stats_lock:
-                metrics = {**stats, 'environment_steps': steps, 'policy_version': version,
-                           'replay_size': len(replay), 'human_steps': human_steps,
-                           'success_rate': successes / completed if completed else None,
-                           'completed_episodes': completed}
+            learner_status = {}
+            if backend:
+                backend.tick(mode == 'train' and control['state'] == 'running')
+                learner_status, _ = backend.snapshot()
+            metrics = {**learner_status.get('metrics', {'learner_steps': 0, 'replay_size': 0}),
+                       'environment_steps': steps, 'policy_version': version, 'human_steps': human_steps,
+                       'success_rate': successes / completed if completed else None, 'completed_episodes': completed}
             status = {'heartbeat': time.time(), 'ack_revision': last_revision, 'state': control['state'],
                       'episode': episode, 'episode_step': episode_step, 'max_episode_steps': config['max_episode_steps'], 'metrics': metrics, 'position_m': env.position.tolist(),
                       'last_action': last_row['action'].tolist() if last_row else [0.] * env.action_dim,
@@ -481,43 +374,47 @@ def train(root, session_id, parent, folder, config, env, session):
                       'last_reward': float(last_row['reward']) if last_row else None,
                       'environment_info': dict(env.info), 'observation_dim': env.observation_dim,
                       'action_dim': env.action_dim, 'schema': env.schema,
-                      'observation_mode': 'pixels' if pixel else 'state', 'image_shape': [9, 64, 64] if pixel else None,
+                      'observation_mode': 'pixels' if pixel else 'state', 'image_shape': list(image_shape(config)) if pixel else None,
                       'capture_metadata': env.capture_metadata if pixel else None,
                       'collection': collection.state() if collection else None,
-                      'classifier_probability': classifier_probability, 'effective_batch_size': batch_size,
+                      'demo_auto_save': False,
+                      'classifier_probability': classifier_probability, 'classifier_logit': classifier_logit,
+                      'classifier_hold_steps': classifier_hold, 'classifier_enabled': classifier is not None,
+                      'effective_batch_size': batch_size,
                       'effective_replay_capacity': capacity,
-                      'checkpoint_path': str(folder / 'policy.npz'), 'dataset_path': str(folder / ('demonstrations.npz' if mode == 'demo' else 'replay.npz')),
-                      'transport': 'Agentlace / loopback TCP', 'error': None}
+                      'checkpoint_path': str(folder / 'policy.npz'), 'dataset_path': (str(Path(learner_status['artifact_directory']) / ('replay' if restored else 'replay.npz')) if backend and backend.remote else str(folder / ('demonstrations.npz' if mode == 'demo' else ('replay' if restored else 'replay.npz')))),
+                      'transport': backend.transport if backend else 'Policy disabled' if passive else 'GPU policy evaluation',
+                      'compute': {'actor_device': str(actor_device) if actor is not None or classifier is not None else 'inactive',
+                                  'actor_memory': (actor or classifier).memory() if restored and (actor is not None or classifier is not None) else memory_status(actor_device) if actor is not None or classifier is not None else {},
+                                  'learner': learner_status, 'shared_process': bool(backend and not backend.remote)}, 'error': None}
             atomic_json(folder / 'runtime.json', status)
             log.flush()
             time.sleep(max(0, 1 / config['control_hz'] - (time.monotonic() - tick)))
     finally:
-        stop.set(); thread.join(timeout=5)
-        try:
-            client.update()
-            log.close()
-            if collection:
-                collection.export()
-            if not passive:
-                np.savez_compressed(folder / 'policy.npz', __schema__=np.array(env.schema), __task__=np.array(json.dumps(task_key(config), sort_keys=True)), __cameras__=np.array(json.dumps(selected(config, 'observation'))), **learner.policy.export())
-                torch.save({'policy': learner.policy.state_dict(), 'q1': learner.q1.state_dict(), 'q2': learner.q2.state_dict(),
-                            'targets': [q.state_dict() for q in learner.targets], 'policy_optimizer': learner.popt.state_dict(),
-                            'critic_optimizer': learner.qopt.state_dict(), 'steps': learner.steps, 'config': config}, folder / 'learner.pt')
-            with replay.sample_lock:
-                rows = list(replay._data_queue)
-                if rows:
-                    save_rows(folder / 'replay.npz', rows, env.schema, config, pixel=pixel)
-            status.update(heartbeat=time.time(), ack_revision=last_revision, state='stopped', artifacts_saved=True)
-            if 'metrics' in status:
-                status['metrics']['learner_steps'] = learner.steps
-            atomic_json(folder / 'runtime.json', status)
-        finally:
-            client.stop()
-            # Stop REP on its owning receive thread before closing its socket.
-            server.req_rep_server.is_kill = True
-            server.thread.join(timeout=2)
-            server.req_rep_server.socket.close(); server.req_rep_server.context.term()
-            server.broadcast_server.socket.close(); server.broadcast_server.context.term()
+        log.close()
+        if collection:
+            collection.export()
+        final_error = None
+        if backend:
+            try:
+                learner_status, weights = backend.close(env.heartbeat)
+                actor.restore(weights)
+                version = learner_status.get('version', version)
+                status.setdefault('metrics', {}).update(learner_status.get('metrics', {}), policy_version=version)
+                status.setdefault('compute', {})['learner'] = {**learner_status, 'placement': 'remote' if backend.remote else 'local', 'pending_transitions': 0}
+            except Exception as exc:
+                final_error = exc
+        if actor is not None:
+            np.savez_compressed(folder / 'policy.npz', __schema__=np.array(env.schema),
+                __task__=np.array(json.dumps(task_key(config), sort_keys=True)),
+                __cameras__=np.array(json.dumps(selected(config, 'observation'))),
+                __crops__=np.array(json.dumps(config.get('camera_crops', {}), sort_keys=True)), **actor.export())
+        status.update(heartbeat=time.time(), ack_revision=last_revision, state='stopped', artifacts_saved=final_error is None)
+        if final_error:
+            status['error'] = str(final_error)
+        atomic_json(folder / 'runtime.json', status)
+        if final_error:
+            raise final_error
 
 
 

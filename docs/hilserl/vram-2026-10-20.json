@@ -1,0 +1,139 @@
+{
+  "date": "2026-10-20",
+  "gpu": "NVIDIA GeForce RTX 5070 Laptop GPU",
+  "physical_vram_mib": 8151,
+  "upstream_commit": "c32939bccb65f3b8c43a9f9add3d322d4ab0264a",
+  "framework": "jax 0.6.2 / flax 0.10.7",
+  "precision": "float32",
+  "image_size": [
+    128,
+    128
+  ],
+  "cameras": [
+    "head",
+    "left_wrist",
+    "right_wrist"
+  ],
+  "measurements": {
+    "actor": {
+      "batch": 1,
+      "baseline_mib": 16.0,
+      "state": "complete",
+      "steady_gpu_delta_mib": 226.0,
+      "peak_gpu_delta_mib": 224.0,
+      "inference_ms": 14.228374988306314,
+      "parameters": 8535180,
+      "peak_tensor_mib": 49.2,
+      "framework_pool_mib": 62.0
+    },
+    "actor_with_classifier": {
+      "batch": 1,
+      "baseline_mib": 16.0,
+      "state": "complete",
+      "steady_gpu_delta_mib": 418.0,
+      "peak_gpu_delta_mib": 418.0,
+      "inference_ms": 28.379348979797214,
+      "parameters": 8535180,
+      "peak_tensor_mib": 153.4,
+      "framework_pool_mib": 254.0
+    },
+    "learner": {
+      "batch": 256,
+      "baseline_mib": 16.0,
+      "state": "complete",
+      "steady_gpu_delta_mib": 7118.0,
+      "peak_gpu_delta_mib": 7118.0,
+      "warm_update_pair_ms": 12692.58005300071,
+      "metrics": {
+        "critic_loss": 1.677250862121582,
+        "actor_loss": 0.3669252395629883,
+        "temperature": 0.009989849291741848,
+        "critic_steps": 6
+      },
+      "peak_tensor_mib": 2860.3,
+      "framework_pool_mib": 6935.2
+    }
+  },
+  "isaac_integration": {
+    "schema": "nist-sg2-rgb3x128-proprio22-delta6-fixed-hilserl-v1",
+    "image_shape": [
+      9,
+      128,
+      128
+    ],
+    "warm_actor_and_classifier_ms": 28.858272009529173,
+    "actor_memory": {
+      "device": "cuda:0",
+      "framework": "JAX",
+      "name": "NVIDIA GeForce RTX 5070 Laptop GPU",
+      "allocated_mib": 144.1,
+      "reserved_mib": 254.0,
+      "peak_allocated_mib": 153.4,
+      "allocator_limit_mib": 5779.3,
+      "free_mib": 977.0,
+      "total_mib": 8151.0
+    },
+    "hardware": {
+      "gpus": [
+        {
+          "device": "cuda:0",
+          "name": "NVIDIA GeForce RTX 5070 Laptop GPU",
+          "total_mib": 8151.0,
+          "used_mib": 6729.0,
+          "free_mib": 977.0
+        }
+      ],
+      "error": null
+    },
+    "overview_rendering": false
+  },
+  "runtime_validation": {
+    "state": "stopped",
+    "artifacts_saved": true,
+    "episodes": 1,
+    "image_shape": [
+      9,
+      128,
+      128
+    ],
+    "compute": {
+      "actor_device": "cuda:0",
+      "actor_memory": {
+        "device": "cuda:0",
+        "framework": "JAX",
+        "name": "NVIDIA GeForce RTX 5070 Laptop GPU",
+        "allocated_mib": 132.9,
+        "reserved_mib": 254.0,
+        "peak_allocated_mib": 177.7,
+        "allocator_limit_mib": 6935.2,
+        "free_mib": 273.0,
+        "total_mib": 8151.0
+      },
+      "learner": {},
+      "shared_process": false
+    }
+  },
+  "notes": [
+    "Actor inference uses batch 1 and holds upstream actor parameters only, without learner critics/optimizer.",
+    "Actor disables XLA convolution autotuning (--xla_gpu_autotune_level=0); model/precision remain unchanged. This avoids GiB-scale warmup/cache allocations; measured actor+classifier latency is ~29 ms.",
+    "Learner uses batch 256, CTA 2, FP32, original SAC losses, augmentation and learned temperature. XLA preallocation is disabled and memory fraction is .90.",
+    "Process VRAM deltas include CUDA context and allocator cache. They are not parameter bytes or fixed GPU reservations.",
+    "Learner probe uses representative synthetic image/state batches, not a trained policy or a learning-success benchmark.",
+    "Isaac integration used actual synchronized camera frames with Overview closed. Later browser polling reopened Overview, leaving only a few hundred MiB free with the actor. Closed/open Overview process measurements are recorded below; a reset-related memory leak was not established.",
+    "Offline classifier training is CPU-based with upstream ResNet-10 and batch 256. Actor reward classification uses CUDA.",
+    "Existing 64x64 datasets/checkpoints remain preserved and require fresh 128x128 collection/retraining for the restored engine."
+  ],
+  "isaac_observations": {
+    "overview_closed_process_mib": 6253,
+    "overview_open_process_mib": 7214,
+    "note": "Observed nvidia-smi process usage; renderer/cache state can vary across episodes."
+  },
+  "deployment": {
+    "image": "cyclo-intelligence:hil-serl-20261020",
+    "image_id": "sha256:01f226afcad67294f08b8623c97559e7e807d7cb8fb8b713f13edc8ce9f4ba9a",
+    "configuration_revision": 10,
+    "learner_placement": "remote",
+    "external_host_connected": false,
+    "ui_bundle": "main.dece862d.js"
+  }
+}

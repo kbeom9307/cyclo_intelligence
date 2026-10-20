@@ -1,0 +1,13 @@
+# Standalone external GPU learner; no simulator, UI, robot driver or actor.
+ARG HIL_LEARNER_BASE_IMAGE=robotis/ros:jazzy-ros-base-torch2.7.0-cuda12.8.0
+FROM ${HIL_LEARNER_BASE_IMAGE}
+RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
+WORKDIR /opt/hilserl
+COPY docker/supervisor_api/requirements*.txt ./
+RUN pip install --no-cache-dir --break-system-packages -r requirements.txt -r requirements-hilserl.txt
+COPY docker/supervisor_api/hilserl*.py ./
+COPY docker/supervisor_api/third_party ./third_party
+COPY docker/supervisor_api/install_hilserl_upstream.sh ./
+RUN sh /opt/hilserl/install_hilserl_upstream.sh
+ENV PYTHONUNBUFFERED=1 NVIDIA_VISIBLE_DEVICES=all NVIDIA_DRIVER_CAPABILITIES=compute,utility
+ENTRYPOINT ["/opt/hil-serl-venv/bin/python", "hilserl_learner_server.py"]
