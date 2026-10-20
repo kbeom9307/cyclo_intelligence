@@ -11,15 +11,17 @@ Each process is split internally into multiple classes/modules.
 
 ---
 
-## HIL-SERL pre-robot Mock runtime
+## HIL-SERL Mock / Isaac NIST runtime
 
 HIL-SERL Lab uses the React UI, `docker/supervisor_api/hilserl.py` control plane,
-and `hilserl_runtime.py` CPU worker. The worker connects a toy XYZ peg environment,
-Actor, Agentlace replay/weight transport, intervention replay and SAC learner.
-It saves policy/dataset artifacts and supports deterministic evaluation.
-Isaac Sim and hardware adapters remain blocked. This state-based integration
-Mock is not upstream visual HIL-SERL or NIST physics. See
-[`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md#hil-serl-lab-pre-robot-mock-runtime).
+and `hilserl_runtime.py` CPU Actor/SAC learner with Agentlace replay and weights.
+`hilserl_isaac.py` connects to the FFW-SG2 NIST physics bridge in `cyclo_lab` using
+sequenced JSON requests and exclusive ownership. Mock uses 4/3 observation/action
+dimensions; Isaac pixel mode uses three RGB views and 22 proprioception values
+with six Cartesian actions and a fixed gripper (legacy state mode: 39/6). Policy/replay
+artifacts carry their schema and camera selection. The local pixel SAC learner
+is not an upstream HIL-SERL/DrQ reproduction; hardware remains blocked. See
+[`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md#hil-serl-lab-mock-and-isaac-nist-runtime).
 
 ## 1. Big Picture
 

@@ -17,6 +17,8 @@ spec.loader.exec_module(hil)
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv('CYCLO_HILSERL_DATA_DIR', str(tmp_path))
+    with hil.database() as db:
+        hil.write(db, "config", {"revision": 0, "config": hil.ExperimentConfig(environment="real_robot").model_dump()})
     app = FastAPI()
     app.include_router(hil.router)
     with TestClient(app) as client:
@@ -34,7 +36,7 @@ def action(client, session, command):
         'action': command, 'expected_revision': session['revision']})
 
 
-def test_default_workspace_is_honest_and_real_execution_is_blocked(client):
+def test_hardware_workflow_preview_does_not_allow_real_execution(client):
     data = client.get('/hilserl/workspace').json()
     assert data['sessions'] == []
     assert data['readiness']['can_preview']
@@ -161,6 +163,8 @@ def test_agentlace_training_intervention_checkpoint_and_evaluation(client, tmp_p
         assert item['episode_outcome'] == 'success'
         item = send('reset')
         item = send('resume')
+        item = send('truncate')
+        assert item['episode_outcome'] == 'truncated'
         item = send('stop')
         hil._workers[item['id']].wait(timeout=10)
         folder = tmp_path / item['id']
@@ -169,6 +173,13 @@ def test_agentlace_training_intervention_checkpoint_and_evaluation(client, tmp_p
             assert data['human'].any()
             assert ((data['action'][:, 0] == 1) & data['human']).any()
             assert data['terminal'].any()
+            assert data['truncated'].any()
+        import json
+        rows = [json.loads(line) for line in (folder / 'transitions.jsonl').read_text().splitlines()]
+        manual_truncations = [row for row in rows if row['label_only'] and row['truncated']]
+        assert len(manual_truncations) == 1
+        assert manual_truncations[0]['terminal'] is False
+        assert manual_truncations[0]['reward'] == 0
         config.update(checkpoint_path=str(folder / 'policy.npz'), demonstration_path=str(folder / 'replay.npz'))
         client.put('/hilserl/config', json={'expected_revision': 1, 'config': config}).raise_for_status()
         item = client.post('/hilserl/sessions', json={'mode': 'evaluate', 'expected_config_revision': 2}).json()
@@ -189,3 +200,46 @@ def test_agentlace_training_intervention_checkpoint_and_evaluation(client, tmp_p
         assert client.post('/hilserl/sessions', json={'mode': 'preview', 'expected_config_revision': 2}).status_code == 201
     finally:
         hil.shutdown()
+
+
+def test_input_activates_intervention_without_toggle_and_expires(client, monkeypatch):
+    from types import SimpleNamespace
+    item = create(client)
+    item.update(mode='train', state='running')
+    item['config']['environment'] = 'mock'
+    with hil.database() as db:
+        hil.write(db, 'session:' + item['id'], item)
+    monkeypatch.setitem(hil._workers, item['id'], SimpleNamespace(poll=lambda: None))
+    monkeypatch.setattr(hil, 'runtime_status', lambda s: {'ack_revision': s['revision']})
+    clock = [1000.]
+    monkeypatch.setattr(hil.time, 'time', lambda: clock[0])
+    path = '/hilserl/sessions/' + item['id']
+    def send(value):
+        return client.post(path + '/action', json={'expected_revision': 0, 'value': value})
+    assert send([1, 0, 0]).status_code == 200
+    assert client.get(path).json()['control_source'] == 'human'
+    assert send([0, 0, 0]).status_code == 200
+    assert client.get(path).json()['control_source'] == 'policy'
+    assert send([1, 0, 0]).status_code == 200
+    clock[0] += 1
+    assert client.get(path).json()['control_source'] == 'policy'
+    item['state'] = 'paused'
+    with hil.database() as db:
+        hil.write(db, 'session:' + item['id'], item)
+    assert send([1, 0, 0]).status_code == 409
+
+@pytest.mark.parametrize('paused', [False, True])
+def test_truncate_requires_reset_and_cannot_repeat(client, paused):
+    session = action(client, create(client), 'start').json()
+    if paused:
+        session = action(client, session, 'pause').json()
+    response = action(client, session, 'truncate')
+    assert response.status_code == 200
+    session = response.json()
+    assert session['state'] == 'paused'
+    assert session['episode_outcome'] == 'truncated'
+    assert action(client, session, 'resume').status_code == 409
+    assert action(client, session, 'truncate').status_code == 409
+    session = action(client, session, 'reset').json()
+    assert session['episode_outcome'] is None
+    assert action(client, session, 'resume').status_code == 200

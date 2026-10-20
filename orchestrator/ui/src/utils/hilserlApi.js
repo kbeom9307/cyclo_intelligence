@@ -28,3 +28,8 @@ export const createHilSession = (revision, mode = 'preview') => request('/sessio
 export const sendHilCommand = (session, action) => request(`/sessions/${encodeURIComponent(session.id)}/commands`, 'POST', { action, expected_revision: session.revision });
 
 export const sendHilAction = (session, value) => request(`/sessions/${encodeURIComponent(session.id)}/action`, 'POST', { value, expected_revision: session.revision });
+export const trainHilClassifier = (session_ids, epochs = 20, threshold = .9) => request('/classifiers/train', 'POST', { session_ids, epochs, threshold, seed: 0 });
+export const sendHilClassifierLabel = (session, success) => request(`/sessions/${encodeURIComponent(session.id)}/classifier-label`, 'POST', { success, expected_revision: session.revision });
+
+export const deleteHilDataset = (id, kind) => request(`/datasets/${encodeURIComponent(id)}/${kind}`, 'DELETE');
+export const deleteHilClassifier = id => request(`/classifiers/${encodeURIComponent(id)}`, 'DELETE');

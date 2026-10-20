@@ -334,9 +334,9 @@
       </div>
     </header>
     <aside style="padding:12px 16px;border:1px solid var(--line);border-radius:8px;background:var(--paper)">
-      <strong>HIL-SERL Lab — pre-robot Mock runtime</strong><br>
-      React UI → /api/hilserl → SQLite control plane → Mock Actor / Agentlace / SAC learner.
-      Mock supports CPU learning, manual intervention, saved policy/replay and evaluation. Isaac Sim and hardware execution remain blocked.
+      <strong>HIL-SERL Lab — Mock / Isaac NIST runtime</strong><br>
+      React UI → /api/hilserl → SQLite control plane → Actor / Agentlace / SAC learner → local Isaac NIST bridge.
+      Mock (4/3) and FFW-SG2 NIST pixel observations (RGB + proprioception / 6 actions, fixed gripper) support learning, intervention, saved policy/replay and evaluation. Hardware execution remains blocked.
     </aside>
 
     <section class="canvas" aria-label="Cyclo Brain architecture diagram">

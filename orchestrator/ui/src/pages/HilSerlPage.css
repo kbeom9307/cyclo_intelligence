@@ -8,7 +8,7 @@
 .hil-help { margin: 10px 0 22px; }
 .hil-badge { padding: 7px 12px; font-size: 12px; font-weight: 600; background: var(--hil-soft); border: 1px solid var(--hil-line); border-radius: 20px; }
 .hil-banner { padding: 14px 18px; border-left: 3px solid #639cce; border-radius: 5px; background: var(--hil-soft); font-size: 13px; line-height: 1.6; }
-.hil-tabs { display: flex; gap: 6px; margin: 22px 0; }
+.hil-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 22px 0; }
 .hil-page button { border: 1px solid var(--hil-line); background: var(--hil-panel); border-radius: 7px; padding: 9px 14px; font-size: 13px; font-weight: 600; cursor: pointer; }
 .hil-page button:hover:not(:disabled) { border-color: #438cc7; }
 .hil-page button:focus-visible, .hil-page input:focus-visible, .hil-page select:focus-visible { outline: 2px solid #479cde; outline-offset: 2px; }
@@ -51,3 +51,73 @@
 .hil-mock-view svg { width: 100%; max-width: 360px; height: 180px; }
 .hil-mock-view code { overflow-wrap: anywhere; }
 .hil-page pre.hil-error { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.hil-live-view { margin-bottom: 20px; }
+.hil-video-frame { aspect-ratio: 4 / 3; width: 100%; max-width: none; margin: 0 auto; background: #0f172a; color: #e2e8f0; display: flex; align-items: center; justify-content: center; border-radius: 8px; overflow: hidden; }
+.hil-video-frame img { width: 100%; height: 100%; object-fit: contain; }
+.hil-live-view:fullscreen { background: #0f172a; padding: 20px; overflow: auto; color: #e2e8f0; }
+.hil-live-view:fullscreen .hil-video-frame { height: calc(100vh - 170px); max-width: none; }
+
+.hil-live-view .hil-card-heading { flex-wrap: wrap; gap: 8px; }
+
+.hil-camera-grid { display: grid; grid-template-columns: repeat(4, minmax(240px, 1fr)); gap: 12px; margin-bottom: 24px; overflow-x: auto; }
+.hil-camera-grid .hil-live-view { min-width: 0; padding: 14px; }
+.hil-camera-grid .hil-video-frame { aspect-ratio: 4 / 3; }
+.hil-episode-progress { display: grid; gap: 8px; margin: 16px 0; font-size: 13px; }
+.hil-episode-progress progress { width: 100%; height: 18px; accent-color: #1768a6; }
+.hil-keyboard-help { padding: 12px; border: 1px solid #438cc7; border-radius: 8px; font-size: 13px; line-height: 1.7; }
+
+.hil-session-layout { grid-template-columns: minmax(0, 1fr) 230px; }
+.hil-session-split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 22px; margin: 20px 0; }
+.hil-episode-pane, .hil-intervention-pane { min-width: 0; padding: 16px; border: 1px solid var(--hil-line); border-radius: 10px; }
+.hil-intervention-pane > .hil-control:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
+.hil-policy-values { margin: 18px 0; }
+.hil-policy-values table { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+.hil-policy-values td, .hil-policy-values th { padding: 7px; text-align: right; border-bottom: 1px solid var(--hil-line); }
+.hil-policy-values th:first-child { text-align: left; }
+.hil-keyboard { background: var(--hil-soft); border-radius: 10px; padding: 14px; }
+.hil-keyboard.disabled { opacity: .6; }
+.hil-keyboard p { font-size: 13px; margin: 0 0 12px; }
+.hil-key-group { margin: 10px 0; }
+.hil-key-group > span, .hil-keyboard small { font-size: 11px; color: var(--hil-muted); }
+.hil-key-group > div { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 5px; }
+.hil-key { display: grid; gap: 4px; justify-items: center; min-width: 43px; padding: 8px 5px; border: 1px solid var(--hil-line); border-radius: 7px; background: var(--hil-panel); }
+.hil-key.pressed { background: #1768a6; border-color: #53b2ff; color: white; box-shadow: 0 0 0 2px #53b2ff55; }
+.hil-key.pressed small { color: white; }
+.hil-key kbd { font-size: 16px; font-weight: 700; }
+.hil-quality { display: flex; align-items: center; gap: 8px; font-size: 12px; margin-bottom: 10px; }
+.hil-quality select { border: 1px solid var(--hil-line); border-radius: 5px; background: var(--hil-panel); color: inherit; padding: 5px; }
+@media (max-width: 1300px) { .hil-session-layout { grid-template-columns: 1fr; } }
+@media (max-width: 800px) { .hil-session-split { grid-template-columns: 1fr; } }
+
+.hil-data-library { margin-top: 20px; }
+.hil-source { display: flex; gap: 8px; align-items: center; margin: 10px 0; }
+.hil-source input { width: auto; }
+.hil-artifact { border-top: 1px solid var(--hil-line); padding: 12px 0; }
+.hil-artifact button { margin-left: 12px; }
+.hil-collection { padding: 12px 0; border-bottom: 1px solid var(--hil-line); }
+
+/* Overview crop changes only the browser viewport, never simulation state. */
+.hil-overview-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 8px 0; font-size: 12px; }
+.hil-overview-frame svg { width: 100%; height: 100%; display: block; touch-action: none; cursor: crosshair; user-select: none; }
+.hil-overview-frame foreignObject { pointer-events: none; }
+.hil-overview-frame foreignObject img { display: block; width: 100%; height: 100%; }
+.hil-crop-selection { fill: #38bdf833; stroke: #38bdf8; stroke-width: 2px; vector-effect: non-scaling-stroke; pointer-events: none; }
+.hil-live-view:fullscreen .hil-overview-frame { height: calc(100vh - 225px); }
+
+.hil-camera-selection { display: flex; flex-wrap: wrap; gap: 16px; margin: 12px 0; }
+.hil-camera-selection label { display: flex; gap: 6px; align-items: center; }
+
+.hil-data-library > .hil-card + .hil-card { margin-top: 20px; }
+.hil-data-filters { display: flex; flex-wrap: wrap; gap: 16px; margin: 14px 0; }
+.hil-data-filters label { display: flex; flex-direction: column; gap: 6px; min-width: 220px; max-width: 100%; }
+.hil-data-filters select { max-width: 100%; padding: 8px; border: 1px solid var(--hil-line); border-radius: 6px; background: var(--hil-panel); color: inherit; }
+.hil-data-table-wrap { overflow-x: auto; margin-top: 12px; }
+.hil-data-table { width: 100%; border-collapse: collapse; text-align: left; }
+.hil-data-table th, .hil-data-table td { padding: 10px; border-bottom: 1px solid var(--hil-line); vertical-align: top; }
+.hil-data-table input { width: auto; }
+.hil-data-table small { display: block; margin-top: 4px; }
+.hil-data-table code { font-size: 11px; }
+
+.hil-space-toggle { display: flex; align-items: center; gap: 8px; margin: 12px 0; }
+.hil-space-toggle input { width: auto; }
