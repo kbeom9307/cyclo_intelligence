@@ -465,6 +465,13 @@ Workflow in Lab:
 
 1. Save Isaac pixel settings, stop any existing session, then choose **Get
    classifier data** and Start. Manually move through success/failure states.
+   MuJoCo classifier sessions initially wait for the first nonzero, unexpired
+   movement/rotation intervention. Live views remain available, but episode
+   steps and image capture stay at zero until that action is applied. Space,
+   takeover alone, zero/expired actions and input while paused do not start
+   collection. Manual capture is also blocked during this wait. Once started,
+   collection continues through key release and pause/resume; the gate applies
+   once per new collection session, not again on Reset.
    Each environment step saves the selected classifier camera observations: hold
    Space for success, otherwise failure. Optional **Space key toggle mode** switches
    labels on each press; Esc, blur, tab change and pause clear the success input.
@@ -472,13 +479,52 @@ Workflow in Lab:
    session-wide success count automatically stops and saves the collection.
    Episode boundaries still pause for reset; the total sample cap is 10,000.
    Explicit capture buttons remain available while paused for unlabeled states.
+   Reset and Stop finalize each classifier episode as one
+   `classifier_samples/episode-NNNNN.npz`. Images are durably staged during
+   collection, then streamed into an atomic archive before staged files are
+   removed. The archive contains named `images_<sample UUID>` and
+   `label_<sample UUID>` arrays, `sample_ids`, episode and environment metadata;
+   the manifest retains per-sample labels, timestamps and capture metadata.
+   `ClassifierSamples` reads individual images without loading a whole episode
+   and supports existing per-image NPZ collections. Existing datasets are not
+   rewritten. Dataset deletion/training waits until finalization completes.
 2. In the separate **Train classifier** tab, **Data management** groups collections
-   by environment, robot, arm and target, then filters compatible camera sets.
+   and checkpoints by the configured **Environment name** (`config.name`,
+   previously labeled Experiment name), then filters compatible camera sets.
+   New manifests retain the collection-time name; older data uses the saved
+   session configuration, never the current setup name. Robot, arm, simulator,
+   target, model backend and camera/crop compatibility are still checked before
+   combining collections for training.
    Select stopped datasets; the selected positive/negative totals are shown before
    **Train classifier**. At least 10 unique samples per class are required.
-   Training and validation must both contain both classes from disjoint episodes;
+   After exact-image deduplication, all selected datasets are pooled without episode
+   boundaries. Each label is randomly split into approximately 75% training and
+   25% validation; failure-only and single-step episodes are included. Both
+   partitions must contain both labels. Seeded per-label RNG and image-hash ordering
+   make unchanged inputs reproducible; changing a label's image pool can change its
+   assignments. Each job saves `split.json` (`global_label_stratified_v1`). This is
+   image-level validation, not unseen-episode evaluation;
    insufficient diversity fails with an explanation. The job shows epoch, loss,
    balanced accuracy, precision/recall, confusion counts and split counts.
+   New classifier jobs use local `cuda:0` by default, independently of Actor/
+   Learner placement. JAX ResNet-10 retains 128×128 observations and batch 256;
+   legacy Torch CNN training also moves model and batches onto the selected GPU.
+   GPU unavailability fails explicitly, with no CPU fallback. The API accepts
+   an explicit `device` override for diagnostics. Job status reports the actual
+   device and peak memory allocation. GPU convolution autotuning stays enabled
+   at level 2; disabling it caused roughly 30× slower repeated batches on the
+   local RTX 5070 Laptop GPU, despite reducing temporary allocator reservations.
+   XLA preallocation is disabled. JAX compilation is cached across classifier
+   jobs in `/workspace/hilserl/classifiers/.jax_cache` (1 GiB limit; override with
+   `CYCLO_HILSERL_CLASSIFIER_CACHE_DIR`). A new model shape, GPU or software version
+   can still require compilation. Evaluation pads the final batch to the fixed
+   batch size, then discards padded predictions before calculating metrics.
+   The job shows image loading, model initialization, batch training, validation
+   and checkpoint phases, plus measured startup and epoch times, before the
+   first epoch finishes. **Stop training** terminates the job,
+   releases its device memory and preserves dataset files, history and the
+   last completed atomic checkpoint. Stopped jobs can use that checkpoint;
+   stopping before the first checkpoint leaves no model to select.
    The best validation balanced-accuracy epoch is saved (validation loss breaks ties),
    rather than unconditionally saving the last epoch. Poor generalization is flagged. **Use classifier** fills
    the setup fields; Save configuration to use it. The reward source `classifier`
@@ -487,9 +533,27 @@ Workflow in Lab:
    Simulator failure handling remains active. Metrics are validation results,
    not proof of general insertion performance.
 3. **Get demo** starts a manual-only, no-learning/no-policy session. Image/state/
-   action/next-image transitions are buffered by episode. Pause or label an
+   action/next-image transitions are buffered by episode. MuJoCo holds the initial
+   pose and records no steps or classifier-review images until the first nonzero,
+   unexpired movement/rotation intervention while running. Preview frames and
+   heartbeats remain available. Key release, pause/resume and episode reset do
+   not re-arm this initial-session gate. Pause or label an
    outcome; **Save successful demo** saves the actual episode with its last
-   transition labeled terminal. **Discard pending demo** rejects an attempt.
+   transition labeled terminal. **Discard pending demo** offers **Discard only**
+   or **Discard & add classifier failures**. The latter labels every recorded
+   post-action classifier view as failure (0), including the final frame that
+   triggered a false success; choose it only when those steps were unsuccessful.
+   Classifier views are buffered independently of the policy's observation camera
+   selection, sharing image buffers when the camera sets match. They are written
+   to `classifier_samples/episode-NNNNN.npz` in the demo session directory with
+   the same environment/task/camera/crop metadata as normal classifier collections
+   and `source: discarded_demo`. A failed write retains the pending demo for retry.
+   Saved demonstrations are unchanged. After stopping the session, these failure
+   images appear in **Train classifier → Data management** under the environment
+   name and can be combined with existing success/failure collections for training.
+   Retrain and apply a new checkpoint to change success detection; discarding a
+   demo alone never modifies classifier weights. Runtimes started before this
+   feature cannot supply missing historical classifier views and allow discard only.
    Reset is blocked until a pending episode is saved/discarded. Natural endings
    pause for review rather than auto-reset. Stop exports saved episodes as
    `demonstrations.npz`; an unfinished episode is kept separately as
@@ -505,9 +569,15 @@ and demos store `images` and `next_images` alongside states/actions/rewards and
 terminal/truncated flags. Artifacts are validated against schema, robot, arm
 and target task. Dataset size limits bound memory; classifier collection is
 limited to 10,000 images/session and demos to 4,096 saved transitions/session.
-Collection sessions use the smaller of `max_episode_steps` and the separate
-`collection_episode_steps` setting (default/max 1,000). Training episode limits
-are preserved; this bounds the pending image-episode buffer.
+Demo sessions use the smaller of `max_episode_steps` and the separate
+`collection_episode_steps` setting (default/max 1,000), bounding the pending
+image-episode buffer. For classifier collection, `collection_episode_steps`
+is the per-episode failure-image window: steps 1..N can save either label;
+after N only success images are saved, while physics and keyboard control
+continue in the same episode. Time-limit truncation and simulator success do
+not pause classifier collection. Physical failures, explicit pause/stop/truncate,
+the success sample target and the 10,000-sample cap still apply. Reset opens a
+new failure-image window. Training episode limits are preserved.
 No user dataset or classifier is automatically fabricated by validation tests;
 synthetic fixtures and integration-test labels remain in temporary test folders.
 
@@ -528,3 +598,77 @@ Overview supports drag-to-crop, Reset crop and fullscreen. Ultra uses a native
 1920×1440 render with JPEG quality 98 and no chroma subsampling; other robot views
 remain 640×360 maximum. Preview quality/cropping never changes the learner's 64×64
 camera inputs or advances physics.
+
+
+### Live training monitor
+
+The training session page shows elapsed time since Start, running time excluding
+pauses, current/completed episodes, cumulative success rate, actor/learner update
+rates, replay readiness, policy version, and queued transitions. Recent success
+rates use the last 5/10/20/50/100 completed episodes; truncated episodes count as
+non-success and unfinished episodes are excluded. Success follows the configured
+classifier/environment result or an explicit human label, not reward magnitude
+alone. Recent episode history is reconstructed from `transitions.jsonl` through
+the existing workspace file endpoint using incremental 1 MiB HTTP byte ranges.
+Only the latest 100 outcomes are retained in browser memory; log flushes can delay
+history briefly. Initial history loading scans the existing log once and reports
+loading/errors. This supports already-running workers without restarting the API
+or simulator. Observed update rates/heartbeat delays are telemetry, not independent
+process health checks. Changing sessions aborts the old reader.
+
+
+The Actor/Learner panels follow upstream `examples/train_rlpd.py` episode and
+W&B telemetry (https://github.com/rail-berkeley/hil-serl/blob/main/examples/train_rlpd.py).
+Actor episode return, transition count, human intervention segments/steps and
+recorded time span are reconstructed from transitions, including ongoing episodes.
+Human label-only rows contribute reward but not movement/intervention step counts.
+Learner now forwards all scalar SAC update diagnostics: critic/actor loss,
+predicted/target Q, batch reward mean, entropy, temperature and temperature loss.
+New runtimes also emit action sampling/environment-step work time and learner
+replay sampling, critic-only and joint update times. These are latest-cycle timings,
+not the upstream logger's running averages. Existing running workers keep their
+loaded code; unavailable new diagnostics remain absent/— until a new runtime is
+started. UI graphs retain at most 180 observed learner telemetry samples and do
+not imply a persisted full training history. Episode return curves use the last
+100 completed episode records.
+
+
+### HIL-SERL training resume after Stop
+
+Stopped HIL-SERL pixel training sessions expose **Resume saved training**. The
+`POST /hilserl/sessions/{id}/restart-training` endpoint checks the source revision,
+successful artifact finalization and absence of another live session, then creates
+a new session with the source experiment configuration. Start is a separate action.
+Policy/demo initialization paths are cleared because the saved online and demo
+replay banks already contain the training data. The original session is preserved.
+
+The learner restores `learner.msgpack` (all Flax parameters, target parameters,
+optimizer states, internal step and RNG) and `learner-state.json` (actor/critic
+update counters). Both disk replay banks are copied by populated slots, preserving
+size/cursor, and `replay/state.json` restores the sampling RNG. Sparse unused
+capacity is not copied. Older snapshots without these new JSON sidecars use the
+final runtime update counters and initialize the replay RNG from the original seed.
+Environment steps, successful/completed episodes, human steps and cumulative active
+time carry forward. Transition history is copied for recent-success statistics.
+The simulator resets and starts a new episode; partially completed simulation state
+is not restored. This is not a bitwise continuation of a physics trajectory.
+
+External learners resume by a UUID under the same server's artifact root. Only that
+run ID and counters cross the protocol; replay stays on the external server. The
+external learner service must run the updated code. Legacy Torch/state-only sessions
+are rejected rather than silently falling back to policy-only initialization.
+
+
+### Configurable HIL-SERL training image resolution
+
+`Experiment setup → Training image resolution` selects 64, 128 (default), or 256
+pixels per side for each robot camera. This shared setting controls classifier
+capture/training and policy observations/demo replay; it does not change preview
+quality or the camera card's display dimensions. MuJoCo and Isaac capture the ROI
+then resize before transmission. Image shape, model initialization, replay storage,
+remote learner specifications and artifact schema all use the selected size.
+Classifier/demo manifests record `image_size`; mixed-resolution datasets are
+rejected, and applying an artifact carries its resolution into training settings.
+Changes apply to new sessions, not running sessions. Full resume retains the source
+resolution. Existing 128 schemas remain unchanged and old manifests default to 128
+for HIL-SERL or 64 for legacy Torch. Legacy Torch remains fixed at 64.

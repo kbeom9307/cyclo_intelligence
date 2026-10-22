@@ -155,7 +155,7 @@ def test_network_failure_preserves_unacknowledged_transitions(tmp_path, monkeypa
     import hilserl_learner
     class Offline:
         def __init__(self, config): pass
-        def open(self, spec, weights): return {'version':0, 'metrics':{}}, {}
+        def open(self, spec, weights, resume=None): return {'version':0, 'metrics':{}}, {}
         def exchange(self, batch, learning, version):
             if batch: raise RuntimeError('connection lost')
             return {'version':0, 'metrics':{}}, {}

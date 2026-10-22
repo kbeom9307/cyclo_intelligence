@@ -1,9 +1,10 @@
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { TextDecoder } from 'util';
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import HilSerlPage from './HilSerlPage';
 import { getHilWorkspace, saveHilConfig, createHilSession, sendHilCommand, sendHilAction, checkHilLearner } from '../utils/hilserlApi';
 
 jest.mock('../utils/hilserlApi');
-jest.mock('./HilIsaacView', () => () => <div>Isaac live camera panel</div>);
+jest.mock('./HilIsaacView', () => props => <div data-testid="live-camera" data-session-config={JSON.stringify(props.sessionConfig)}>Isaac live camera panel</div>);
 const config = {
   name: 'Peg insertion', robot_type: 'ffw_bg2_rev4', environment: 'isaac_sim', board: 'nist_atb1',
   task: 'peg_insertion', arm: 'right', control_hz: 10, max_episode_steps: 200,
@@ -17,7 +18,11 @@ const session = { id: 'test', revision: 0, mode: 'preview', state: 'created', co
   metrics: {}, events: [], created_at: '2026-10-16T00:00:00Z' };
 let workspace;
 beforeEach(() => {
+  global.TextDecoder = TextDecoder;
+  HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open',''); };
+  HTMLDialogElement.prototype.close = function () { this.removeAttribute('open'); };
   jest.resetAllMocks();
+  global.fetch = jest.fn().mockResolvedValue({status:404});
   workspace = { config, revision: 0, sessions: [], readiness: { can_preview: true, can_train: false,
     checks: [{ id: 'actor', label: 'Actor', ready: false, detail: 'Not connected' }] } };
   getHilWorkspace.mockImplementation(async () => workspace);
@@ -34,13 +39,16 @@ test('shows disconnected runtime and never offers real training', async () => {
 test('restores upstream model, batch, replay and update settings without starting a session', async () => {
   workspace.config = { ...config, learning_backend: 'legacy_torch', pixel_batch_size: 32, pixel_replay_capacity: 2048 };
   render(<HilSerlPage />);
-  fireEvent.click(await screen.findByRole('button', { name: 'Restore upstream HIL-SERL settings' }));
+  fireEvent.click(await screen.findByRole('button', { name: 'Reset to default settings' }));
   expect(screen.getByLabelText('Learning engine')).toHaveValue('hil_serl');
   expect(screen.getByLabelText('Pixel batch size')).toHaveValue(256);
   expect(screen.getByLabelText('Pixel replay capacity per buffer')).toHaveValue(200000);
   expect(screen.getByLabelText('Discount factor')).toHaveValue(.97);
   expect(screen.getByLabelText('Critic updates per actor update')).toHaveValue(2);
+  expect(screen.queryByLabelText('head crop Left')).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', {name:'Edit observation crop'}));
   expect(screen.getByLabelText('head crop Left')).toHaveValue(0);
+  await screen.findByText(/Camera unavailable/);
   expect(createHilSession).not.toHaveBeenCalled();
 });
 
@@ -50,7 +58,7 @@ test('saves config before allowing a preview with changed settings', async () =>
     return { config: value, revision: 1 };
   });
   render(<HilSerlPage />);
-  fireEvent.change(await screen.findByLabelText('Experiment name'), { target: { value: 'NIST run' } });
+  fireEvent.change(await screen.findByLabelText('Environment name'), { target: { value: 'NIST run' } });
   expect(screen.getByRole('button', { name: 'Create preview session' })).toBeDisabled();
   fireEvent.click(screen.getByRole('button', { name: 'Save configuration' }));
   await waitFor(() => expect(saveHilConfig).toHaveBeenCalledWith(expect.objectContaining({ name: 'NIST run' }), 0));
@@ -81,17 +89,17 @@ test('starts preview with automatic keyboard intervention and no takeover toggle
 test('displays backend conflicts and preserves unsaved fields', async () => {
   saveHilConfig.mockRejectedValue(new Error('Configuration changed. Reload before saving.'));
   render(<HilSerlPage />);
-  fireEvent.change(await screen.findByLabelText('Experiment name'), { target: { value: 'My draft' } });
+  fireEvent.change(await screen.findByLabelText('Environment name'), { target: { value: 'My draft' } });
   fireEvent.click(screen.getByRole('button', { name: 'Save configuration' }));
   expect(await screen.findByRole('alert')).toHaveTextContent('Configuration changed');
-  expect(screen.getByLabelText('Experiment name')).toHaveValue('My draft');
+  expect(screen.getByLabelText('Environment name')).toHaveValue('My draft');
 });
 
 test('failed initial load can be retried', async () => {
   getHilWorkspace.mockRejectedValueOnce(new Error('Service unavailable'));
   render(<HilSerlPage />);
   fireEvent.click(await screen.findByRole('button', { name: 'Retry connection' }));
-  expect(await screen.findByLabelText('Experiment name')).toHaveValue('Peg insertion');
+  expect(await screen.findByLabelText('Environment name')).toHaveValue('Peg insertion');
 });
 
 
@@ -301,4 +309,61 @@ test('configures external GPU learner and checks the selected endpoint', async (
   expect(checkHilLearner).toHaveBeenCalledWith(expect.objectContaining({learner_placement:'remote',learner_device:'cuda:1',actor_device:'cuda:0'}));
   fireEvent.click(screen.getByRole('button', {name:'Save configuration'}));
   await waitFor(()=>expect(saveHilConfig).toHaveBeenCalledWith(expect.objectContaining({learner_url:'https://learner.example.com'}),0));
+});
+
+test('MuJoCo preset saves the direct-grasp simulator and clears incompatible artifact selections', async () => {
+  workspace.config = {...config, classifier_path: '/workspace/hilserl/old-classifier.npz', checkpoint_path: '/workspace/hilserl/old-policy.npz'};
+  saveHilConfig.mockImplementation(async value => {
+    workspace = {...workspace, config: value, revision: 1};
+    return {config: value, revision: 1};
+  });
+  render(<HilSerlPage />);
+  fireEvent.click(await screen.findByRole('button', {name: 'Use MuJoCo NIST settings'}));
+  expect(screen.getByLabelText('Target environment')).toHaveValue('mujoco');
+  expect(screen.getByLabelText('Simulator start state')).toHaveValue('near_hole');
+  expect(screen.getByRole('button', {name: 'Create MuJoCo training session'})).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', {name: 'Save configuration'}));
+  await waitFor(() => expect(saveHilConfig).toHaveBeenCalledWith(expect.objectContaining({
+    environment: 'mujoco', initialization: 'near_hole', control_hz: 20, robot_type: 'ffw_sg2_rev1',
+    classifier_path: '', checkpoint_path: '', demonstration_path: '', reward_source: 'environment',
+  }), 0));
+});
+
+
+test('stopped training can create a full resume session without starting automatically', async () => {
+  const {restartHilTraining} = require('../utils/hilserlApi');
+  const old = {...session, id:'saved-training', mode:'train', state:'stopped',
+    config:{...config, learning_backend:'hil_serl'}, runtime:{artifacts_saved:true}, runtime_pending:false};
+  workspace.sessions = [old];
+  const next = {...old, id:'resumed-training', state:'created', runtime:undefined,
+    resume:{session_id:old.id,counters:{learner_steps:20}}};
+  restartHilTraining.mockImplementation(async () => {workspace.sessions = [next,old]; return next;});
+  render(<HilSerlPage />);
+  fireEvent.click(await screen.findByRole('button', {name:'Session & history'}));
+  fireEvent.click(await screen.findByRole('button', {name:'Resume saved training'}));
+  await waitFor(() => expect(restartHilTraining).toHaveBeenCalledWith(old));
+  expect(sendHilCommand).not.toHaveBeenCalled();
+  expect(await screen.findByText(/Resuming training from saved-training/)).toBeInTheDocument();
+});
+
+
+test('training image resolution is saved numerically without starting a runtime', async () => {
+  workspace.config = {...config, learning_backend:'hil_serl', image_size:128};
+  saveHilConfig.mockImplementation(async value => { workspace={...workspace,config:value,revision:1}; return workspace; });
+  render(<HilSerlPage />);
+  fireEvent.change(await screen.findByLabelText('Training image resolution'), {target:{value:'256'}});
+  fireEvent.click(screen.getByRole('button',{name:'Save configuration'}));
+  await waitFor(() => expect(saveHilConfig).toHaveBeenCalledWith(expect.objectContaining({image_size:256}),0));
+  expect(sendHilCommand).not.toHaveBeenCalled();
+});
+
+
+test.each(['classifier','demo','train'])('camera previews use saved %s session config instead of setup draft', async mode => {
+  workspace.config={...config,camera_crops:{head:[0,0,1,1]},image_size:128};
+  const saved={...config,camera_crops:{head:[.2,.1,.8,.9]},image_size:256};
+  workspace.sessions=[{...session,mode,config:saved}];
+  render(<HilSerlPage />);
+  const sessionTab = await screen.findByRole('button',{name:'Session & history'});
+  await act(async () => { fireEvent.click(sessionTab); });
+  expect(JSON.parse(screen.getByTestId('live-camera').getAttribute('data-session-config'))).toEqual(saved);
 });

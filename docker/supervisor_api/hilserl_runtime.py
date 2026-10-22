@@ -25,7 +25,7 @@ from hilserl_devices import resolve_device, memory_status
 from hilserl_learner import AsyncLearner, make_spec
 from hilserl_data import Collection, save_rows, task_key
 from hilserl_cameras import selected, validate_artifact
-from hilserl_profiles import upstream, image_shape
+from hilserl_profiles import upstream, image_shape, jax_memory_fraction
 import zmq
 
 
@@ -88,7 +88,7 @@ def run(root, session_id, parent_pid=None):
     config = {'actor_device': 'cuda:0', 'learner_device': 'cuda:0', 'learner_placement': 'local', **session()['config']}
     if upstream(config):
         os.environ.setdefault('XLA_PYTHON_CLIENT_PREALLOCATE', 'false')
-        os.environ.setdefault('XLA_PYTHON_CLIENT_MEM_FRACTION', '.90')
+        os.environ.setdefault('XLA_PYTHON_CLIENT_MEM_FRACTION', jax_memory_fraction(config))
         # Inference autotuning can reserve several GiB for batch 1. Fixed
         # kernels avoid that warmup allocation beside Isaac without changing
         # model parameters or floating-point precision.
@@ -99,6 +99,9 @@ def run(root, session_id, parent_pid=None):
     if config['environment'] == 'isaac_sim':
         from hilserl_isaac import IsaacNistEnv
         env = IsaacNistEnv(config)
+    elif config['environment'] == 'mujoco':
+        from hilserl_mujoco import MujocoNistEnv
+        env = MujocoNistEnv(config)
     elif config['environment'] == 'mock':
         env = MockPegEnv(config)
     else:
@@ -110,12 +113,14 @@ def run(root, session_id, parent_pid=None):
 
 
 def train(root, session_id, parent, folder, config, env, session):
+    resume = session().get('resume')
     mode = session()['mode']
     pixel = getattr(env, 'pixel_mode', False)
     restored = pixel and upstream(config)
     passive = mode in ('preview', 'demo', 'classifier')
     collecting = mode in ('demo', 'classifier')
-    collection = Collection(folder, config, mode, env.schema) if collecting else None
+    collection = Collection(folder, config, mode, env.schema,
+                            wait_for_intervention=config['environment'] == 'mujoco') if collecting else None
     batch_size = config.get('pixel_batch_size', 32) if pixel else config['batch_size']
     capacity = config.get('pixel_replay_capacity', 2048) if pixel else config['replay_capacity']
     needs_classifier = config['reward_source'] == 'classifier' and mode not in ('preview', 'classifier')
@@ -139,7 +144,7 @@ def train(root, session_id, parent, folder, config, env, session):
     classifier_hold = 0
     classifier_probability = None
     classifier_logit = None
-    if not passive and config['checkpoint_path']:
+    if not passive and config['checkpoint_path'] and not resume:
         with np.load(config['checkpoint_path'], allow_pickle=False) as data:
             if pixel:
                 validate_artifact(data, selected(config, 'observation'), config)
@@ -156,7 +161,7 @@ def train(root, session_id, parent, folder, config, env, session):
                 raise ValueError('Policy checkpoint contains non-finite weights')
             initial_weights = weights
     demos = []
-    if mode == 'train' and config['demonstration_path']:
+    if mode == 'train' and config['demonstration_path'] and not resume:
         with np.load(config['demonstration_path'], allow_pickle=False) as data:
             schema = str(data['__schema__']) if '__schema__' in data else 'mock-xyz-state4-delta3-v1'
             if schema != env.schema:
@@ -198,18 +203,27 @@ def train(root, session_id, parent, folder, config, env, session):
         if initial_weights:
             actor.restore(initial_weights)
     if mode == 'train':
-        backend = AsyncLearner(config, make_spec(config, env), folder, initial_weights, demos, env.heartbeat)
+        backend = AsyncLearner(config, make_spec(config, env), folder, initial_weights, demos, env.heartbeat, resume=resume)
         _, weights = backend.snapshot()
         actor.restore(weights)
     del demos
-    steps = completed = successes = human_steps = 0
+    counts = resume['counters'] if resume else {}
+    steps = counts.get('environment_steps', 0)
+    completed = counts.get('completed_episodes', 0)
+    successes = counts.get('successful_episodes', 0)
+    human_steps = counts.get('human_steps', 0)
     episode_step = 0
-    version = 0
-    episode = 1
+    version = backend.snapshot()[0].get('version', 0) if backend else 0
+    episode = counts.get('episode', 1)
     last_revision = 0
     obs = env.observation()
     last_row = None
     mode = session()['mode']
+    if resume:
+        import shutil
+        previous_log = root / resume['session_id'] / 'transitions.jsonl'
+        if previous_log.is_file():
+            shutil.copyfile(previous_log, folder / 'transitions.jsonl')
     log = (folder / 'transitions.jsonl').open('a')
     status = {}
     def prepare_episode():
@@ -217,9 +231,11 @@ def train(root, session_id, parent, folder, config, env, session):
         last_row = None
         classifier_hold, classifier_probability, classifier_logit = 0, None, None
         if collection:
-            collection.rows = []
+            collection.finish_episode(episode, env.heartbeat)
+            collection.clear_pending_demo()
             collection.done = False
             collection.error = None
+            collection.episode_step = 0
         status.update(initializing=True, episode_step=0, episode=episode + 1,
                       last_action=[0.] * env.action_dim, last_policy_action=[0.] * env.action_dim,
                       policy_enabled=not passive, last_action_source='hold', last_reward=None)
@@ -229,6 +245,7 @@ def train(root, session_id, parent, folder, config, env, session):
         while os.getppid() == parent:
             tick = time.monotonic()
             tick_wall = time.time()
+            actor_timers = {}
             control = session()
             env.heartbeat()
             if control['state'] != 'running':
@@ -238,16 +255,16 @@ def train(root, session_id, parent, folder, config, env, session):
             for event in events:
                 if event['action'] == 'reset':
                     obs = prepare_episode(); episode += 1; episode_step = 0
-                elif collection and event['action'] in ('capture_success', 'capture_failure', 'save_demo', 'discard_demo'):
+                elif collection and event['action'] in ('capture_success', 'capture_failure', 'save_demo', 'discard_demo', 'discard_demo_as_failure'):
                     try:
                         collection.error = None
                         if event['action'].startswith('capture_'):
                             obs = collection.capture(env, int(event['action'] == 'capture_success'), episode)
                         elif event['action'] == 'save_demo':
                             collection.save_demo(episode)
-                        elif event['action'] == 'discard_demo':
-                            collection.rows = []
-                    except ValueError as exc:
+                        elif event['action'] in ('discard_demo', 'discard_demo_as_failure'):
+                            collection.discard_demo(episode, add_classifier_failures=event['action'] == 'discard_demo_as_failure', heartbeat=env.heartbeat)
+                    except (ValueError, OSError) as exc:
                         collection.error = str(exc)
                 elif event['action'] in ('success', 'failure', 'truncate'):
                     if collection:
@@ -275,22 +292,38 @@ def train(root, session_id, parent, folder, config, env, session):
                 learner_status, weights = backend.snapshot()
                 if learner_status.get('version', 0) > version:
                     actor.restore(weights); version = learner_status['version']
-            if control['state'] == 'running' and not (collection and collection.target_reached):
-                manual = control.get('manual_action', {})
-                human = time.time() < manual.get('expires_at', 0) and any(manual.get('value', []))
+            manual = control.get('manual_action', {})
+            human = time.time() < manual.get('expires_at', 0) and any(manual.get('value', []))
+            if control['state'] == 'running' and human and collection:
+                collection.waiting_for_intervention = False
+            # MuJoCo live views and heartbeats stay available while the initial
+            # pose is held. Begin episode steps and recording on the first real
+            # action, then keep recording through key release and pause/resume.
+            if control['state'] == 'running' and not (collection and (collection.target_reached or collection.waiting_for_intervention)):
+                sampling_started = time.perf_counter()
                 with torch.no_grad():
                     proposed = (np.zeros(env.action_dim, dtype=np.float32) if passive else
                                 actor.action(obs, env.images, deterministic=mode == 'evaluate') if restored else
                                 actor.sample(torch.as_tensor(obs, dtype=torch.float32, device=actor_device)[None], deterministic=mode == 'evaluate', **({'images': torch.as_tensor(env.images, device=actor_device)[None]} if pixel else {}))[0][0].cpu().numpy())
+                actor_timers['sample_actions_seconds'] = time.perf_counter() - sampling_started
                 if human:
                     action = np.array(manual['value'], dtype=np.float32)
-                    if config['environment'] == 'isaac_sim':
+                    if config['environment'] in ('isaac_sim', 'mujoco'):
                         action = env.tcp_to_action(action)
                 else:
                     action = proposed
                 images = env.images.copy() if pixel else None
+                environment_started = time.perf_counter()
                 nxt, reward, terminal, truncated = env.step(action)
+                actor_timers['step_env_seconds'] = time.perf_counter() - environment_started
                 if mode == 'classifier':
+                    collection.episode_step = episode_step + 1
+                    # Classifier labels come from the operator. Keep observing a
+                    # successful pose; time limits end negative sampling, not physics.
+                    if env.info.get('is_success') and not env.info.get('is_failure'):
+                        terminal = False
+                    if collection.episode_step >= config['max_episode_steps']:
+                        truncated = False
                     label_input = control.get('classifier_label', {})
                     label = int(bool(label_input.get('success')) and tick_wall < label_input.get('expires_at', 0))
                     collection.capture(env, label, episode, fresh=False, automatic=True)
@@ -317,7 +350,7 @@ def train(root, session_id, parent, folder, config, env, session):
                     row.update(images=images, next_images=env.images.copy(), capture_metadata=env.capture_metadata)
                 if mode == 'demo':
                     row['human'] = True
-                    collection.rows.append(row)
+                    collection.record_demo(row, env)
                 if backend:
                     backend.insert(row)
                 log.write(json.dumps({k: v.tolist() if isinstance(v, np.ndarray) else v for k, v in row.items() if k not in ('images', 'next_images')}) + '\n')
@@ -363,8 +396,9 @@ def train(root, session_id, parent, folder, config, env, session):
                 backend.tick(mode == 'train' and control['state'] == 'running')
                 learner_status, _ = backend.snapshot()
             metrics = {**learner_status.get('metrics', {'learner_steps': 0, 'replay_size': 0}),
+                       **actor_timers, 'actor_cycle_seconds': time.monotonic() - tick,
                        'environment_steps': steps, 'policy_version': version, 'human_steps': human_steps,
-                       'success_rate': successes / completed if completed else None, 'completed_episodes': completed}
+                       'success_rate': successes / completed if completed else None, 'completed_episodes': completed, 'successful_episodes': successes}
             status = {'heartbeat': time.time(), 'ack_revision': last_revision, 'state': control['state'],
                       'episode': episode, 'episode_step': episode_step, 'max_episode_steps': config['max_episode_steps'], 'metrics': metrics, 'position_m': env.position.tolist(),
                       'last_action': last_row['action'].tolist() if last_row else [0.] * env.action_dim,
@@ -393,7 +427,7 @@ def train(root, session_id, parent, folder, config, env, session):
     finally:
         log.close()
         if collection:
-            collection.export()
+            collection.export(env.heartbeat)
         final_error = None
         if backend:
             try:
@@ -409,7 +443,9 @@ def train(root, session_id, parent, folder, config, env, session):
                 __task__=np.array(json.dumps(task_key(config), sort_keys=True)),
                 __cameras__=np.array(json.dumps(selected(config, 'observation'))),
                 __crops__=np.array(json.dumps(config.get('camera_crops', {}), sort_keys=True)), **actor.export())
-        status.update(heartbeat=time.time(), ack_revision=last_revision, state='stopped', artifacts_saved=final_error is None)
+        status.setdefault('metrics', {}).update(environment_steps=steps, completed_episodes=completed,
+            successful_episodes=successes, human_steps=human_steps, success_rate=successes / completed if completed else None)
+        status.update(episode=episode, heartbeat=time.time(), ack_revision=last_revision, state='stopped', artifacts_saved=final_error is None)
         if final_error:
             status['error'] = str(final_error)
         atomic_json(folder / 'runtime.json', status)

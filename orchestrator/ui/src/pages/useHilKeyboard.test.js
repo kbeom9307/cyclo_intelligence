@@ -45,3 +45,16 @@ test('fixed gripper ignores Z/X keyboard input', () => {
   expect(sendHilAction).not.toHaveBeenCalled();
   expect(screen.queryByText('Gripper')).not.toBeInTheDocument();
 });
+
+test('MuJoCo keyboard sends all six axes including wrist rotation', async () => {
+  const original = session.config.environment;
+  session.config.environment = 'mujoco';
+  try {
+    const {unmount} = render(<Harness />);
+    fireEvent.keyDown(window, {code:'ArrowUp'});
+    await waitFor(() => expect(sendHilAction).toHaveBeenLastCalledWith(expect.anything(), [0,0,0,0,1,0]));
+    fireEvent.keyUp(window, {code:'ArrowUp'});
+    await waitFor(() => expect(sendHilAction).toHaveBeenLastCalledWith(expect.anything(), [0,0,0,0,0,0]));
+    unmount();
+  } finally { session.config.environment = original; }
+});

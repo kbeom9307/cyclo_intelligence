@@ -5,6 +5,7 @@ SAC losses, frozen ImageNet ResNet-10, spatial pooling, and random crop pipeline
 No TensorFlow or PyTorch CUDA context is created for this engine.
 """
 import os
+import json
 from pathlib import Path
 import sys
 
@@ -20,7 +21,7 @@ from flax import serialization, traverse_util
 from flax.core import freeze, unfreeze
 from serl_launcher.agents.continuous.sac import SACAgent
 from serl_launcher.vision.data_augmentations import batched_random_crop
-from hilserl_profiles import CAMERAS, UPSTREAM_CLASSIFIER
+from hilserl_profiles import CAMERAS, UPSTREAM_CLASSIFIER, image_shape, classifier_schema
 from hilserl_cameras import selected
 
 
@@ -64,12 +65,12 @@ def restore_tree(template, arrays, device):
     return jax.device_put(traverse_util.unflatten_dict(dict(arrays), sep='/'), device)
 
 
-def observations(states, images, cameras):
+def observations(states, images, cameras, size=128):
     states, images = np.asarray(states, np.float32), np.asarray(images, np.uint8)
     if states.ndim == 1:
         states, images = states[None], images[None]
-    if images.shape != (len(states), 9, 128, 128):
-        raise ValueError('HIL-SERL requires native 128×128 camera observations; collect a new dataset')
+    if images.shape != (len(states), 9, size, size):
+        raise ValueError(f'HIL-SERL requires {size}×{size} camera observations; use matching datasets')
     result = {'state': states[:, None, :]}
     for camera in cameras:
         index = CAMERAS.index(camera)
@@ -96,7 +97,7 @@ def make_agent(config, observation_dim=22, action_dim=6):
     cameras = tuple(selected(config, 'observation'))
     with jax.default_device(jax.devices('cpu')[0]):
         sample = observations(np.zeros((1, observation_dim), np.float32),
-                              np.zeros((1, 9, 128, 128), np.uint8), cameras)
+                              np.zeros((1, *image_shape(config)), np.uint8), cameras, image_shape(config)[1])
         network = {'activations': jax.nn.tanh, 'use_layer_norm': True, 'hidden_dims': [256, 256]}
         optimizer = {'learning_rate': config.get('learning_rate', 3e-4)}
         agent = SACAgent.create_pixels(
@@ -132,7 +133,7 @@ class UpstreamPolicy:
 
     def action(self, state, images, deterministic=False):
         self.rng, key = jax.random.split(self.rng)
-        obs = jax.device_put(observations(state, images, self.cameras), self.device)
+        obs = jax.device_put(observations(state, images, self.cameras, image_shape(self.config)[1]), self.device)
         return np.asarray(self.apply(self.params, obs, key, deterministic))[0]
 
     def export(self):
@@ -158,8 +159,8 @@ class UpstreamSAC:
         values = {key: np.stack([r[key] for r in rows]) for key in
                   ('observation', 'action', 'reward', 'next_observation', 'terminal', 'images', 'next_images')}
         return jax.device_put(freeze({
-            'observations': observations(values['observation'], values['images'], self.policy.cameras),
-            'next_observations': observations(values['next_observation'], values['next_images'], self.policy.cameras),
+            'observations': observations(values['observation'], values['images'], self.policy.cameras, image_shape(self.config)[1]),
+            'next_observations': observations(values['next_observation'], values['next_images'], self.policy.cameras, image_shape(self.config)[1]),
             'actions': values['action'].astype(np.float32),
             'rewards': values['reward'].astype(np.float32),
             'masks': 1. - values['terminal'].astype(np.float32),
@@ -174,9 +175,10 @@ class UpstreamSAC:
         if not critic_only:
             self.steps += 1
             self.policy.params = {'modules_actor': self.agent.state.params['modules_actor']}
-        return {'critic_loss': float(metrics['critic']['critic_loss']),
-                **({} if critic_only else {'actor_loss': float(metrics['actor']['actor_loss']),
-                                          'temperature': float(self.agent.forward_temperature())}),
+        return {**{key: float(value) for key, value in metrics['critic'].items()},
+                **({} if critic_only else {
+                    **{key: float(value) for key, value in metrics['actor'].items()},
+                    **{key: float(value) for key, value in metrics['temperature'].items()}}),
                 'critic_steps': self.critic_steps}
 
     def restore_policy(self, arrays):
@@ -189,17 +191,29 @@ class UpstreamSAC:
         temporary = folder / 'learner.msgpack.tmp'
         temporary.write_bytes(serialization.to_bytes(jax.device_get(self.agent.state)))
         temporary.replace(folder / 'learner.msgpack')
+        (folder / 'learner-state.json').write_text(json.dumps({'learner_steps': self.steps, 'critic_steps': self.critic_steps}))
+
+    def restore_training(self, folder, counts):
+        folder = Path(folder)
+        state = serialization.from_bytes(self.agent.state, (folder / 'learner.msgpack').read_bytes())
+        self.agent = self.agent.replace(state=jax.device_put(state, self.device))
+        self.policy.params = {'modules_actor': self.agent.state.params['modules_actor']}
+        saved = folder / 'learner-state.json'
+        counts = json.loads(saved.read_text()) if saved.exists() else counts
+        self.steps = int(counts['learner_steps'])
+        self.critic_steps = int(counts['critic_steps'])
 
     def memory(self):
         return memory(self.device)
 
 
 class UpstreamClassifier:
-    def __init__(self, cameras=CAMERAS, device='cpu', seed=0):
+    def __init__(self, cameras=CAMERAS, device='cpu', seed=0, image_size=128):
+        self.image_size = image_size
         from serl_launcher.networks.reward_classifier import create_classifier
         self.cameras, self.device = tuple(cameras), device_for(device)
         with jax.default_device(jax.devices('cpu')[0]):
-            sample = observations(np.zeros((1, 22)), np.zeros((1, 9, 128, 128), np.uint8), self.cameras)
+            sample = observations(np.zeros((1, 22)), np.zeros((1, 9, image_size, image_size), np.uint8), self.cameras, image_size)
             self.state = create_classifier(jax.random.PRNGKey(seed), sample, self.cameras)
         self.state = jax.device_put(self.state, self.device)
         self.rng = jax.device_put(jax.random.PRNGKey(seed), self.device)
@@ -207,7 +221,7 @@ class UpstreamClassifier:
 
     def logits(self, images):
         images = np.asarray(images)
-        batch = observations(np.zeros((len(images), 22)), images, self.cameras)
+        batch = observations(np.zeros((len(images), 22)), images, self.cameras, self.image_size)
         return np.asarray(self.infer(self.state.params, jax.device_put(batch, self.device))).reshape(-1)
 
     def predict(self, images):
@@ -216,7 +230,7 @@ class UpstreamClassifier:
 
     def train_batch(self, images, labels):
         self.rng, key = jax.random.split(self.rng)
-        batch = observations(np.zeros((len(images), 22)), images, self.cameras)
+        batch = observations(np.zeros((len(images), 22)), images, self.cameras, self.image_size)
         self.state, loss = classifier_step(self.state, jax.device_put(batch, self.device),
                                           jax.device_put(np.asarray(labels, np.float32), self.device), key, self.cameras)
         return float(loss)
@@ -231,9 +245,10 @@ class UpstreamClassifier:
     def load(cls, path, device='cpu'):
         import json
         with np.load(path, allow_pickle=False) as data:
-            if str(data['__schema__']) != UPSTREAM_CLASSIFIER:
-                raise ValueError('Select a 128×128 ResNet-10 classifier checkpoint; legacy CNN checkpoints require retraining')
-            model = cls(json.loads(str(data['__cameras__'])), device)
+            size = next((n for n in (64, 128, 256) if str(data['__schema__']) == classifier_schema({'learning_backend':'hil_serl', 'image_size':n})), None)
+            if size is None:
+                raise ValueError('Select a supported ResNet-10 classifier checkpoint; legacy CNN checkpoints require retraining')
+            model = cls(json.loads(str(data['__cameras__'])), device, image_size=size)
             model.restore({k: data[k] for k in data.files if not k.startswith('__')})
         return model
 

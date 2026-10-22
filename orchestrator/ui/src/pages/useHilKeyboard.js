@@ -12,7 +12,7 @@ export default function useHilKeyboard(session, enabled, onError) {
   const [pressedKeys, setPressedKeys] = useState([]);
   const id = session?.id;
   const revision = session?.revision;
-  const dimensions = session?.config.environment === 'isaac_sim' ? 6 : 3;
+  const dimensions = ['isaac_sim', 'mujoco'].includes(session?.config.environment) ? 6 : 3;
   useEffect(() => {
     setPressedKeys([]);
     if (!enabled) return undefined;

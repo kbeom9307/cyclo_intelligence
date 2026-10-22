@@ -157,8 +157,11 @@ def test_isaac_preview_requires_live_bridge(monkeypatch, tmp_path):
     monkeypatch.setattr(hil._isaac, 'health', lambda: {'ready': False, 'error': 'offline'})
     app = FastAPI(); app.include_router(hil.router)
     with TestClient(app) as client:
+        config = client.get('/hilserl/workspace').json()['config']
+        config['environment'] = 'isaac_sim'
+        assert client.put('/hilserl/config', json={'expected_revision': 0, 'config': config}).status_code == 200
         assert not client.get('/hilserl/workspace').json()['readiness']['can_preview']
-        assert client.post('/hilserl/sessions', json={'mode': 'preview', 'expected_config_revision': 0}).status_code == 409
+        assert client.post('/hilserl/sessions', json={'mode': 'preview', 'expected_config_revision': 1}).status_code == 409
 
 
 @pytest.mark.skipif(os.environ.get('CYCLO_TEST_ISAAC') != '1', reason='Requires idle Isaac bridge')

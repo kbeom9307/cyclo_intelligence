@@ -1,5 +1,6 @@
 """Learner engine and asynchronous local/remote execution, with CPU replay storage."""
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from itertools import islice
 import json
 from pathlib import Path
@@ -27,7 +28,7 @@ def make_spec(config, env):
     fields = ('environment', 'robot_type', 'arm', 'target_part', 'observation_cameras', 'seed',
               'learning_rate', 'discount', 'learner_device', 'pixel_batch_size', 'pixel_replay_capacity',
               'batch_size', 'replay_capacity', 'learning_backend', 'cta_ratio', 'training_starts', 'policy_publish_interval',
-              'camera_crops')
+              'camera_crops', 'image_size')
     return {'protocol': PROTOCOL, 'pixel': bool(getattr(env, 'pixel_mode', False)), 'schema': env.schema,
             'observation_dim': env.observation_dim, 'action_dim': env.action_dim,
             'config': {key: config[key] for key in fields if key in config}}
@@ -35,10 +36,15 @@ def make_spec(config, env):
 
 class LearnerEngine:
     """Single owner thread; local Agentlace remains bound to loopback (pickle)."""
-    def __init__(self, spec, folder, weights=None):
+    def __init__(self, spec, folder, weights=None, resume_folder=None, resume_counts=None):
         self.spec, self.config, self.folder = spec, spec['config'], Path(folder)
         self.pixel = spec['pixel']
         self.upstream = self.pixel and upstream(self.config)
+        if resume_folder:
+            from hilserl_resume import validate_snapshot
+            validate_snapshot(resume_folder, spec)
+            if weights:
+                raise ValueError('Cannot combine policy initialization and full resume')
         if self.upstream:
             from hilserl_upstream import UpstreamSAC
             from hilserl_replay import DiskReplay
@@ -53,6 +59,9 @@ class LearnerEngine:
         self.capacity = self.config['pixel_replay_capacity' if self.pixel else 'replay_capacity']
         self.batch_size = self.config['pixel_batch_size' if self.pixel else 'batch_size']
         self.replay = DiskReplay(self.folder / 'replay', spec) if self.upstream else Replay(self.capacity)
+        if resume_folder:
+            self.learner.restore_training(resume_folder, resume_counts or {})
+            self.replay.restore(Path(resume_folder) / 'replay')
         trainer.ReqRepServer, trainer.BroadcastServer = LocalReply, LocalBroadcast
         transport = trainer.TrainerConfig()
         self.server = trainer.TrainerServer(transport)
@@ -61,7 +70,9 @@ class LearnerEngine:
         self.server.start(threaded=True)
         self.queue = QueuedDataStore(256)
         self.client = trainer.TrainerClient('actor', '127.0.0.1', transport, data_store=self.queue)
-        self.metrics = {'learner_steps': 0, 'replay_size': 0}
+        self.metrics = {'learner_steps': self.learner.steps, **self.replay_status()[1]}
+        if self.upstream:
+            self.metrics['critic_steps'] = self.learner.critic_steps
         self.closed = False
 
     def snapshot(self, version=-1, final=False):
@@ -72,7 +83,8 @@ class LearnerEngine:
                 'learner_memory': self.learner.memory() if self.upstream else memory_status(self.learner.device), 'artifacts_saved': self.closed,
                 'artifact_directory': str(self.folder)}, weights
 
-    def exchange(self, rows, learning, version, offline=False):
+    def ingest(self, rows, offline=False):
+        """Agentlace socket work stays on its owning thread, even during training."""
         for row in rows:
             if offline and self.upstream:
                 self.replay.insert_demo(row)
@@ -80,17 +92,48 @@ class LearnerEngine:
                 self.queue.insert(row)
         if not self.client.update():
             raise RuntimeError('Agentlace replay transfer failed')
-        ready = self.replay.ready(self.config.get('training_starts', 100)) if self.upstream else len(self.replay) >= self.batch_size
-        if learning and ready:
-            if self.upstream:
-                for _ in range(self.config.get('cta_ratio', 2) - 1):
-                    self.learner.update(self.replay.sample(self.batch_size), critic_only=True)
-            self.metrics.update(self.learner.update(self.replay.sample(self.batch_size)))
-            if not self.upstream and self.learner.steps % 5 == 0:
-                self.server.publish_network({'weights': self.learner.policy.export(), 'version': self.learner.steps})
-        self.metrics.update(learner_steps=self.learner.steps, replay_size=len(self.replay))
+
+    def learn(self):
+        sampling_seconds = critic_seconds = 0.
+        started = time.perf_counter()
         if self.upstream:
-            self.metrics.update(demo_replay_size=self.replay.demo.size, replay_ready=ready)
+            for _ in range(self.config.get('cta_ratio', 2) - 1):
+                sample_started = time.perf_counter()
+                batch = self.replay.sample(self.batch_size)
+                sampling_seconds += time.perf_counter() - sample_started
+                update_started = time.perf_counter()
+                self.learner.update(batch, critic_only=True)
+                critic_seconds += time.perf_counter() - update_started
+        sample_started = time.perf_counter()
+        batch = self.replay.sample(self.batch_size)
+        sampling_seconds += time.perf_counter() - sample_started
+        update_started = time.perf_counter()
+        self.metrics.update(self.learner.update(batch))
+        self.metrics.update(sample_replay_seconds=sampling_seconds,
+                            train_critics_seconds=critic_seconds,
+                            train_seconds=time.perf_counter() - update_started,
+                            learner_cycle_seconds=time.perf_counter() - started)
+        if not self.upstream and self.learner.steps % 5 == 0:
+            self.server.publish_network({'weights': self.learner.policy.export(), 'version': self.learner.steps})
+
+    def replay_status(self):
+        ready = self.replay.ready(self.config.get('training_starts', 100)) if self.upstream else len(self.replay) >= self.batch_size
+        status = {'replay_size': len(self.replay)}
+        if self.upstream:
+            status.update(demo_replay_size=self.replay.demo.size, replay_ready=ready)
+        return ready, status
+
+    def learn_and_snapshot(self, version):
+        self.learn()
+        self.metrics.update(learner_steps=self.learner.steps, **self.replay_status()[1])
+        return self.snapshot(version)
+
+    def exchange(self, rows, learning, version, offline=False):
+        self.ingest(rows, offline=offline)
+        ready, replay_status = self.replay_status()
+        if learning and ready:
+            return self.learn_and_snapshot(version)
+        self.metrics.update(learner_steps=self.learner.steps, **replay_status)
         return self.snapshot(version)
 
     def close(self):
@@ -114,6 +157,7 @@ class LearnerEngine:
                 if rows:
                     save_rows(self.folder / 'replay.npz', rows, self.spec['schema'], self.config, pixel=self.pixel)
             self.closed = True
+            self.metrics.update(learner_steps=learner.steps, **self.replay_status()[1])
             return self.snapshot(final=True)
         finally:
             self.client.stop()
@@ -125,7 +169,7 @@ class LearnerEngine:
 
 class AsyncLearner:
     """Network/optimizer work never runs in the actor control loop. Bounded, lossless queue."""
-    def __init__(self, config, spec, folder, weights, demos, heartbeat=lambda: None):
+    def __init__(self, config, spec, folder, weights, demos, heartbeat=lambda: None, resume=None):
         self.remote = config.get('learner_placement', 'local') == 'remote'
         restored = spec['pixel'] and upstream(config)
         self.transport = 'HTTPS/NPZ → remote Agentlace / SAC' if self.remote else 'Agentlace / loopback TCP'
@@ -148,9 +192,11 @@ class AsyncLearner:
             try:
                 if self.remote:
                     self.endpoint = RemoteEndpoint(config)
-                    self.meta, self.weights = self.endpoint.open(spec, weights)
+                    self.meta, self.weights = self.endpoint.open(spec, weights, resume=resume)
                 else:
-                    self.endpoint = LearnerEngine(spec, folder, weights)
+                    self.endpoint = LearnerEngine(spec, folder, weights,
+                        resume_folder=resume.get('learner_directory') if resume else None,
+                        resume_counts=resume.get('counters') if resume else None)
                     self.meta, self.weights = self.endpoint.snapshot()
                 for i in range(0, len(demos), 32):
                     # The frozen ResNet policy is ~33 MiB. Do not download the
@@ -158,6 +204,9 @@ class AsyncLearner:
                     self.endpoint.exchange(demos[i:i + 32], False, self.meta.get('version', 0), offline=True)
                 self.meta, self.weights = self.endpoint.exchange([], False, -1)
                 self.ready.set()
+                if restored and not self.remote:
+                    self._local_upstream_loop()
+                    return
                 while True:
                     with self.condition:
                         self.condition.wait_for(lambda: self.stop_requested or self.pending or self.generation > self.completed_generation or (restored and self.learning), timeout=.5)
@@ -203,6 +252,48 @@ class AsyncLearner:
         while not self.ready.wait(.25):
             heartbeat()
         self.check()
+
+    def _local_upstream_loop(self):
+        """Keep replay ingestion live while XLA compiles or runs an update.
+
+        Only the optimizer thread reads/writes learner parameters. The owning
+        transport thread ingests rows and exposes the last completed snapshot.
+        In-flight updates finish before pause acknowledgement or checkpointing.
+        """
+        future = None
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix='hil-optimizer') as pool:
+            while True:
+                with self.condition:
+                    if not self.pending and not self.stop_requested:
+                        self.condition.wait(timeout=.05)
+                    rows = list(islice(self.pending, 32))
+                    generation = self.generation
+                if rows:
+                    self.endpoint.ingest(rows)
+                    with self.condition:
+                        for _ in rows:
+                            self.pending.popleft()
+                if future is not None and future.done():
+                    meta, weights = future.result()
+                    with self.condition:
+                        self.meta = meta
+                        if weights:
+                            self.weights = weights
+                    future = None
+                ready, replay_status = self.endpoint.replay_status()
+                with self.condition:
+                    self.meta = {**self.meta, 'metrics': {**self.meta.get('metrics', {}), **replay_status}}
+                    if future is None and self.learning and not self.stop_requested and ready:
+                        future = pool.submit(self.endpoint.learn_and_snapshot, self.meta.get('version', -1))
+                    self.busy = future is not None or bool(self.pending)
+                    self.completed_generation = generation
+                    self.condition.notify_all()
+                    if self.stop_requested and not self.pending and future is None:
+                        break
+                if self.stop_requested and future is not None:
+                    # No new inserts after stop; avoid spinning during the final update.
+                    with self.condition:
+                        self.condition.wait(timeout=.05)
 
     def check(self):
         if self.error:

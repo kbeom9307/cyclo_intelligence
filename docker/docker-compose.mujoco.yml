@@ -1,0 +1,23 @@
+name: cyclo_mujoco
+services:
+  mujoco:
+    container_name: cyclo_mujoco
+    image: cyclo-mujoco-nist:local
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.mujoco
+    network_mode: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: [gpu]
+    restart: unless-stopped
+    stop_grace_period: 20s
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,urllib.request; assert json.load(urllib.request.urlopen('http://127.0.0.1:7126/health',timeout=2))['ready']"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 30s

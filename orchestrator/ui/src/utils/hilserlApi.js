@@ -1,6 +1,6 @@
-async function request(path, method = 'GET', body) {
+async function request(path, method = 'GET', body, timeoutMs = 15000) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 15000);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(`/api/hilserl${path}`, {
       method, signal: controller.signal,
@@ -33,7 +33,10 @@ export const sendHilClassifierLabel = (session, success) => request(`/sessions/$
 
 export const deleteHilDataset = (id, kind) => request(`/datasets/${encodeURIComponent(id)}/${kind}`, 'DELETE');
 export const deleteHilClassifier = id => request(`/classifiers/${encodeURIComponent(id)}`, 'DELETE');
+export const stopHilClassifier = id => request(`/classifiers/${encodeURIComponent(id)}/stop`, 'POST');
 export const deleteHilDemoEpisodes = (id, episodes) => request(`/datasets/${encodeURIComponent(id)}/demo/delete-episodes`, 'POST', { episodes });
-export const combineHilDemos = selections => request('/datasets/demo/combine', 'POST', { selections });
+export const combineHilDemos = selections => request('/datasets/demo/combine', 'POST', { selections }, 120000);
 
 export const checkHilLearner = config => request('/learner/check', 'POST', config);
+
+export const restartHilTraining = session => request(`/sessions/${encodeURIComponent(session.id)}/restart-training`, 'POST', {expected_revision: session.revision});

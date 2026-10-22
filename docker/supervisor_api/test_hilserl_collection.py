@@ -131,7 +131,7 @@ def test_classifier_job_api_with_stopped_labeled_collection(tmp_path, monkeypatc
     from hilserl_pixels import IMAGE_SHAPE, PIXEL_SCHEMA
     monkeypatch.setenv('CYCLO_HILSERL_DATA_DIR',str(tmp_path))
     monkeypatch.setattr(hil,'_classifier_workers',{})
-    config=hil.ExperimentConfig(environment='isaac_sim',robot_type='ffw_sg2_rev1',control_hz=20, classifier_cameras=['left_wrist']).model_dump()
+    config=hil.ExperimentConfig(environment='isaac_sim',robot_type='ffw_sg2_rev1',control_hz=20, classifier_cameras=['left_wrist'], learning_backend='legacy_torch').model_dump()
     identifier=str(uuid4());collection=Collection(tmp_path/identifier,config,'classifier',PIXEL_SCHEMA)
     class Env:
         capture_metadata={'sequence':1}
@@ -142,12 +142,13 @@ def test_classifier_job_api_with_stopped_labeled_collection(tmp_path, monkeypatc
         for step in range(10):
             env.info={'physics_steps':step}; env.images=rng.integers(0,255,IMAGE_SHAPE,dtype=np.uint8)
             collection.capture(env,step%2,episode)
+    collection.export()
     with hil.database() as db:
         hil.write(db,'session:'+identifier,{'id':identifier,'mode':'classifier','state':'stopped','config':config,
                   'revision':0,'metrics':{},'episode':1,'episode_outcome':None})
     app=FastAPI();app.include_router(hil.router)
     with TestClient(app) as client:
-        response=client.post('/hilserl/classifiers/train',json={'session_ids':[identifier],'epochs':1})
+        response=client.post('/hilserl/classifiers/train',json={'session_ids':[identifier],'epochs':1,'device':'cpu'})
         assert response.status_code==202,response.text
         job=response.json()['id']
         process=hil._classifier_workers[job]
@@ -155,22 +156,24 @@ def test_classifier_job_api_with_stopped_labeled_collection(tmp_path, monkeypatc
         state=next(item for item in hil.classifier_jobs() if item['id']==job)
         assert state['state']=='complete' and Path(state['checkpoint_path']).is_file()
         assert state['cameras'] == ['left_wrist']
+        assert state['environment_names'] == [config['name']]
         with np.load(state['checkpoint_path']) as model:
             assert json.loads(str(model['__cameras__'])) == ['left_wrist']
-        assert not set(state['train_groups'])&set(state['validation_groups'])
+        assert state['validation_split'] == 'global_label_stratified_v1'
         assert client.post('/hilserl/classifiers/train',json={'session_ids':['missing']}).status_code==409
 
 
-def test_collection_limit_does_not_change_training_config(tmp_path, monkeypatch):
+@pytest.mark.parametrize('mode,expected_limit', [('demo', 1000), ('classifier', 10000)])
+def test_collection_limit_does_not_change_training_config(tmp_path, monkeypatch, mode, expected_limit):
     monkeypatch.setenv('CYCLO_HILSERL_DATA_DIR',str(tmp_path))
-    monkeypatch.setattr(hil,'preflight',lambda config:{'can_demo':True})
+    monkeypatch.setattr(hil,'preflight',lambda config:{'can_' + mode:True})
     app=FastAPI();app.include_router(hil.router)
     config=hil.ExperimentConfig(max_episode_steps=10000,collection_episode_steps=1000).model_dump()
     with TestClient(app) as client:
         client.put('/hilserl/config',json={'expected_revision':0,'config':config}).raise_for_status()
-        response=client.post('/hilserl/sessions',json={'expected_config_revision':1,'mode':'demo'})
+        response=client.post('/hilserl/sessions',json={'expected_config_revision':1,'mode':mode})
         response.raise_for_status()
-        assert response.json()['config']['max_episode_steps']==1000
+        assert response.json()['config']['max_episode_steps']==expected_limit
     with hil.database() as db:
         assert hil.settings(db)['config']['max_episode_steps']==10000
 

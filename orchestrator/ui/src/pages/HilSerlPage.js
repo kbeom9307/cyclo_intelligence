@@ -1,7 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { getHilWorkspace, saveHilConfig, createHilSession, sendHilCommand, sendHilAction, checkHilLearner } from '../utils/hilserlApi';
+import { getHilWorkspace, saveHilConfig, createHilSession, sendHilCommand, sendHilAction, checkHilLearner, restartHilTraining } from '../utils/hilserlApi';
 import './HilSerlPage.css';
 import HilIsaacView from './HilIsaacView';
+import HilObservationCropDialog from './HilObservationCropDialog';
+import HilTrainingMonitor from './HilTrainingMonitor';
 import { HilCollectionControls, HilDataLibrary, HilDemoData } from './HilDataPanel';
 import useHilKeyboard from './useHilKeyboard';
 import useHilCaptureKeyboard from './useHilCaptureKeyboard';
@@ -9,6 +11,8 @@ import { HilActionTelemetry, HilPressedKeys, HilComputeTelemetry, HilGpuInventor
 
 const robots = { ffw_bg2_rev4: 'AI Worker · BG2 Rev4', ffw_sg2_rev1: 'AI Worker · SG2 Rev1', ffw_sh5_rev1: 'AI Worker · SH5 Rev1' };
 const display = (value) => value == null ? '—' : value;
+const simulated = environment => ['isaac_sim', 'mujoco'].includes(environment);
+const simulatorLabel = environment => ({isaac_sim: 'Isaac Sim', mujoco: 'MuJoCo', mock: 'Mock', real_robot: 'Physical AI Worker'}[environment] || 'Simulator');
 
 export default function HilSerlPage() {
   const [workspace, setWorkspace] = useState(null);
@@ -59,17 +63,22 @@ export default function HilSerlPage() {
     try { await operation(); } catch (e) { setError(e.message); }
     finally { setBusy(false); }
   };
-  const update = (key, value) => { setDraft((current) => ({ ...current, [key]: value })); setDirty(true); };
+  const update = (key, value) => { setDraft((current) => ({ ...current, [key]: value, ...(key === 'environment' && value !== current.environment ? {classifier_path: '', demonstration_path: '', checkpoint_path: '', reward_source: 'environment', camera_crops: {}, ...(value === 'mujoco' ? {initialization: 'near_hole', robot_type: 'ffw_sg2_rev1', control_hz: 20} : {})} : {}) })); setDirty(true); };
   const session = workspace?.sessions.find((item) => item.id === selectedId) ?? workspace?.sessions[0];
-  const environmentLabel = draft?.environment === 'isaac_sim' ? 'Isaac Sim' : 'Mock';
-  const sessionLabel = session?.config.environment === 'isaac_sim' ? 'Isaac Sim' : 'Mock';
-  const isaacSession = session?.config.environment === 'isaac_sim';
-  const physicalPreview = isaacSession && ['preview', 'demo', 'classifier'].includes(session?.mode);
-  const keyboardEnabled = tab === 'session' && session?.state === 'running' && !session?.runtime_pending && (session?.mode !== 'preview' || isaacSession);
+  const environmentLabel = simulatorLabel(draft?.environment);
+  const sessionLabel = simulatorLabel(session?.config.environment);
+  const simulatorSession = simulated(session?.config.environment);
+  const physicalPreview = simulatorSession && ['preview', 'demo', 'classifier'].includes(session?.mode);
+  const keyboardEnabled = tab === 'session' && session?.state === 'running' && !session?.runtime_pending && (session?.mode !== 'preview' || simulatorSession);
   const pressedKeys = useHilKeyboard(session, keyboardEnabled, setError);
   const episodeStep = session?.runtime?.episode_step ?? session?.runtime?.environment_info?.episode_step ?? 0;
-  const manualDimensions = isaacSession ? 6 : 3;
-  const manualAxes = isaacSession ? ['X', 'Y', 'Z', 'Roll', 'Pitch', 'Yaw'] : ['X', 'Y', 'Z'];
+  const episodeStepLimit = session?.mode === 'classifier'
+    ? (session.runtime?.collection?.failure_step_limit ?? session.config.collection_episode_steps ?? 1000)
+    : session?.config.max_episode_steps;
+  const manualDimensions = simulatorSession ? 6 : 3;
+  const manualAxes = simulatorSession ? ['X', 'Y', 'Z', 'Roll', 'Pitch', 'Yaw'] : ['X', 'Y', 'Z'];
+  const bridge = workspace?.readiness?.bridge;
+  const availableTargets = bridge?.environment === draft?.environment ? (bridge?.target_parts_by_arm?.[draft?.arm] || bridge?.target_parts) : null;
   const configStale = workspace && editRevision !== workspace.revision;
   const active = workspace?.sessions.some((item) => item.state !== 'stopped');
   const restartCollection = session?.mode === 'classifier' && session?.state === 'stopped';
@@ -140,6 +149,7 @@ export default function HilSerlPage() {
 
   const applyArtifact = async (key, path, cameras, artifact) => {
     const config = {...draft, [key]: path, observation_mode: 'pixels',
+      ...(artifact?.image_size ? {image_size: artifact.image_size} : {}),
       ...(key === 'classifier_path' ? {reward_source: 'classifier', classifier_cameras: cameras || ['head', 'left_wrist', 'right_wrist']}
         : {...(artifact?.task || {}), observation_cameras: cameras || ['head', 'left_wrist', 'right_wrist'],
           pixel_replay_capacity: Math.max(draft.pixel_replay_capacity || 2048, artifact?.steps || 0)})};
@@ -174,9 +184,9 @@ export default function HilSerlPage() {
   return <div className="hil-page">
     <header className="hil-header">
       <div><div className="hil-eyebrow">CYCLO INTELLIGENCE / ONLINE LEARNING</div><h1>HIL-SERL Lab</h1><p>AI Worker × NIST Assembly Task Board</p></div>
-      <span className="hil-badge">{workspace?.readiness.bridge?.ready ? 'Isaac Sim connected · Agentlace / SAC' : workspace?.readiness.can_train ? 'Mock runtime ready · Agentlace / SAC' : 'Preview available · Runtime not connected'}</span>
+      <span className="hil-badge">{workspace?.readiness.bridge?.ready ? `${simulatorLabel(workspace.config.environment)} connected · Agentlace / SAC` : workspace?.readiness.can_train ? 'Mock runtime ready · Agentlace / SAC' : 'Preview available · Runtime not connected'}</span>
     </header>
-    <div className="hil-banner">Actor inference and SAC learning use the selected GPU devices. The learner can run locally or on an external GPU server; local replay uses Agentlace transport. Isaac Sim connects to the FFW-SG2 NIST physics scene through its local bridge, using synchronized RGB images, robot proprioception and 6-axis control with a fixed gripper. Isaac Preview initializes the simulator for manual control without learning. Other previews rehearse controls; physical robot execution is unavailable.</div>
+    <div className="hil-banner">Actor inference and SAC learning use the selected GPU devices. The learner can run locally or on an external GPU server; local replay uses Agentlace transport. MuJoCo or Isaac Sim connects to the FFW-SG2 NIST physics scene through its local bridge, using synchronized RGB images, robot proprioception and 6-axis control with a fixed gripper. Simulator Preview initializes the simulator for manual control without learning. Other previews rehearse controls; physical robot execution is unavailable.</div>
     {error && <div role="alert" className="hil-error">{error} <button type="button" disabled={busy} onClick={() => run(() => refresh(!draft))}>Retry connection</button></div>}
     {notice && <div role="status" className="hil-notice">{notice}</div>}
     {!workspace || !draft ? <p>Loading HIL-SERL workspace…</p> : <>
@@ -185,21 +195,23 @@ export default function HilSerlPage() {
         <button aria-pressed={tab === 'session'} onClick={() => setTab('session')}>Session & history</button>
         <button aria-pressed={tab === 'classifier'} onClick={() => setTab('classifier')}>Train classifier</button>
       </nav>
-      {((tab === 'setup' && draft.environment === 'isaac_sim') || (tab === 'session' && isaacSession)) && <HilIsaacView />}
+      {((tab === 'setup' && simulated(draft.environment)) || (tab === 'session' && simulatorSession)) && <HilIsaacView environment={tab === 'session' ? session.config.environment : draft.environment}
+        sessionConfig={tab === 'session' && ['classifier','demo','train'].includes(session.mode) ? session.config : undefined}
+        sessionMode={tab === 'session' ? session.mode : undefined} sessionId={tab === 'session' ? session.id : ''} />}
       {tab === 'setup' ? <div className="hil-layout">
         <form onSubmit={save} className="hil-card">
           <div className="hil-card-heading"><h2>Environment & task</h2><span>Saved revision {workspace.revision}</span></div>
           <fieldset disabled={busy} className="hil-fields">
-            {field('name', 'Experiment name', { required: true, maxLength: 120 })}
+            {field('name', 'Environment name', { required: true, maxLength: 120 })}
             {select('robot_type', 'Robot model', robots)}
-            {select('environment', 'Target environment', { mock: 'Mock · no robot required', isaac_sim: 'Isaac Sim', real_robot: 'Physical AI Worker' })}
+            {select('environment', 'Target environment', { mock: 'Mock · no robot required', isaac_sim: 'Isaac Sim', mujoco: 'MuJoCo · CPU physics', real_robot: 'Physical AI Worker' })}
             {select('arm', 'Working arm', { right: 'Right arm', left: 'Left arm' })}
-            {select('initialization', 'Isaac start state', { near_hole: 'Already grasped near hole (direct reset)', pick_place: 'Pick from tray → above hole (vertical)', grasped: 'Selected peg grasped (verified)', kit: 'Peg in kit tray' })}
-            {select('target_part', 'Target peg (Isaac Sim)', Object.fromEntries(['round', 'square'].flatMap((shape) => [4, 8, 12, 16].map((size) => [`peg_${shape}_${size}`, `${shape} ${size} mm`]))))}
+            {select('initialization', 'Simulator start state', draft.environment === 'mujoco' ? {near_hole: 'Already grasped near hole (direct reset)'} : { near_hole: 'Already grasped near hole (direct reset)', pick_place: 'Pick from tray → above hole (vertical)', grasped: 'Selected peg grasped (verified)', kit: 'Peg in kit tray' })}
+            {select('target_part', 'Target peg', Object.fromEntries(['round', 'square'].flatMap((shape) => [4, 8, 12, 16].map((size) => [`peg_${shape}_${size}`, `${shape} ${size} mm`])).filter(([part]) => !availableTargets || availableTargets.includes(part))))}
             {select('board', 'Board', { nist_atb1: 'NIST Assembly Task Board #1' })}
             {select('task', 'Task', { peg_insertion: 'Peg insertion' })}
           </fieldset>
-          <p className="hil-help">Isaac Sim requires the running NIST bridge, FFW-SG2 and 20 Hz. The default start places the robot and held peg directly near the hole, verifies free-physics retention, then begins at episode step 0. No tray pickup or transfer motion is performed. Preparation is excluded from episode steps. Tray pick/place and legacy starts remain optional.</p>
+          <p className="hil-help">MuJoCo and Isaac Sim require their running NIST bridge, FFW-SG2 and 20 Hz. The default start places the robot and held peg directly near the hole, verifies free-physics retention, then begins at episode step 0. No tray pickup or transfer motion is performed. Preparation is excluded from episode steps. MuJoCo uses the direct near-hole start. Other starts remain available in Isaac Sim.</p>
           <h2>Control & success criteria</h2>
           <fieldset disabled={busy} className="hil-fields">
             {field('control_hz', 'RL step frequency (Hz)', { type: 'number', required: true, min: 1, max: 50 })}
@@ -213,6 +225,7 @@ export default function HilSerlPage() {
             {field('success_hold_s', 'Success hold time (s)', { type: 'number', required: true, min: 0.001, max: 10, step: 'any' })}
             {select('reward_source', 'Reward source', { environment: 'Environment ground truth', human: 'Human label', classifier: 'Success classifier' })}
           </fieldset>
+          <p className="hil-help">Collection episode step limit ends failure-image recording for classifier data; the episode continues collecting success images until the success target is reached. For demonstrations it remains an episode limit.</p>
           <h2>Compute & external learner</h2>
           <fieldset disabled={busy} className="hil-fields">
             {field('actor_device', 'Actor device', { required: true, pattern: '(cpu|cuda:[0-9]+)', placeholder: 'cuda:0' })}
@@ -236,14 +249,14 @@ export default function HilSerlPage() {
           <p className="hil-help">CUDA requests never fall back to CPU. Preview and classifier data collection create no policy or learner. Demo classification uses the actor device. In external mode only actor inference and reward classification use local GPU memory.</p>
           <h2>Learner settings</h2>
           <button type="button" disabled={busy} onClick={() => {
-            setDraft(value => ({ ...value, learning_backend: 'hil_serl', pixel_batch_size: 256,
+            setDraft(value => ({ ...value, learning_backend: 'hil_serl', image_size: 128, pixel_batch_size: 256,
               pixel_replay_capacity: 200000, discount: .97, learning_rate: .0003,
               cta_ratio: 2, training_starts: 100, policy_publish_interval: 50 }));
             setDirty(true);
-          }}>Restore upstream HIL-SERL settings</button>
+          }}>Reset to default settings</button>
           <fieldset disabled={busy} className="hil-fields">
             {select('learning_backend', 'Learning engine', { hil_serl: 'HIL-SERL · JAX / pretrained ResNet-10', legacy_torch: 'Legacy · small PyTorch CNN (64×64)' })}
-            {select('observation_mode', 'Policy observations', { pixels: 'RGB images + robot proprioception (Isaac)', state: 'Legacy state-only policy' })}
+            {select('observation_mode', 'Policy observations', { pixels: 'RGB images + robot proprioception', state: 'Legacy state-only policy' })}
             {field('pixel_batch_size', 'Pixel batch size', { type: 'number', min: 2, max: 1024, step: 2 })}
             {field('pixel_replay_capacity', 'Pixel replay capacity per buffer', { type: 'number', min: 64, max: 1000000 })}
             {field('cta_ratio', 'Critic updates per actor update', { type: 'number', min: 1, max: 16 })}
@@ -256,10 +269,18 @@ export default function HilSerlPage() {
             {field('discount', 'Discount factor', { type: 'number', required: true, min: 0.000001, max: 1, step: 'any' })}
           </fieldset>
           <p className="hil-help">{draft.learning_backend === 'hil_serl'
-            ? 'HIL-SERL uses native 128×128 RGB crops, frozen ImageNet ResNet-10, separate camera embeddings, 256×256 policy/critic heads and 22 proprioception values. Batch 256 mixes 128 online and 128 demo/intervention transitions. Two critic updates per actor update, random crop padding 4 and learned entropy temperature match upstream. The learner runs independently of environment steps. Replay stays in disk-backed CPU storage; both 200,000-transition buffers together can grow to about 110 GiB for three cameras. A demo or intervention is required before learning starts.'
+            ? 'HIL-SERL uses RGB crops at the selected training resolution, frozen ImageNet ResNet-10, separate camera embeddings, 256×256 policy/critic heads and 22 proprioception values. Batch 256 mixes 128 online and 128 demo/intervention transitions. Two critic updates per actor update, random crop padding 4 and learned entropy temperature match upstream. The learner runs independently of environment steps. Replay stays in disk-backed CPU storage; at 128×128, both 200,000-transition buffers together can grow to about 110 GiB for three cameras. A demo or intervention is required before learning starts.'
             : 'Legacy pixel SAC uses a small trainable CNN and 64×64 RGB images. Mock/state mode uses the separate state batch and replay settings.'}</p>
-          {draft.learning_backend === 'hil_serl' && <p className="hil-help">Existing 64×64 data and small-CNN checkpoints remain in the data library. Collect new 128×128 classifier data and demonstrations, then retrain the classifier before using them with HIL-SERL. Offline classifier training uses the original ResNet-10 and batch 256 on CPU; actor and learner use the devices selected above.</p>}
+
           <h2>Observations & artifacts</h2>
+          <label className="hil-field"><span>Training image resolution</span>
+            <select aria-label="Training image resolution" disabled={busy || draft.learning_backend !== 'hil_serl'}
+              value={draft.learning_backend === 'hil_serl' ? (draft.image_size || 128) : 64}
+              onChange={event => update('image_size', Number(event.target.value))}>
+              <option value={64}>64 × 64</option><option value={128}>128 × 128 (default)</option><option value={256}>256 × 256</option>
+            </select>
+          </label>
+          <p className="hil-help">Applies to each robot camera used by classifier data, demonstrations, Actor and Learner. Save configuration and create a new session to apply. Existing data and checkpoints must match this resolution. Preview View size and Quality are independent. 256×256 uses four times as many image pixels as 128×128.</p>
           {['observation', 'classifier'].map(purpose => <fieldset key={purpose} disabled={busy || draft.observation_mode !== 'pixels'} className="hil-camera-selection">
             <legend>{purpose === 'observation' ? 'Policy observation cameras' : 'Success classifier cameras'}</legend>
             {[['head', 'Head'], ['left_wrist', 'Left wrist'], ['right_wrist', 'Right wrist']].map(([camera, label]) => {
@@ -269,22 +290,9 @@ export default function HilSerlPage() {
             })}
           </fieldset>)}
           <p className="hil-help">Choose at least one camera for each purpose. Classifier capture/reward and policy observations use independent selections. Save and start a new session to apply. Overview is for visualization only.</p>
-          {draft.learning_backend === 'hil_serl' && <fieldset disabled={busy} className="hil-fields">
-            <legend>Observation crop · before resizing to 128×128</legend>
-            {['head', 'left_wrist', 'right_wrist'].map(camera => <div key={camera}>
-              <strong>{camera}</strong>
-              {['Left', 'Top', 'Right', 'Bottom'].map((edge, index) => <label key={edge}>{edge} (0–1)
-                <input type="number" min="0" max="1" step=".01" aria-label={`${camera} crop ${edge}`}
-                  value={(draft.camera_crops?.[camera] || [0, 0, 1, 1])[index]}
-                  onChange={event => {
-                    const roi = [...(draft.camera_crops?.[camera] || [0, 0, 1, 1])];
-                    roi[index] = Number(event.target.value);
-                    update('camera_crops', { ...draft.camera_crops, [camera]: roi });
-                  }} />
-              </label>)}
-            </div>)}
-            <p className="hil-help">Crop coordinates refer to the full camera image. The same crop is used for policy and classifier data from that camera. Existing artifacts require matching crops. Preview zoom does not change training observations.</p>
-          </fieldset>}
+          {draft.learning_backend === 'hil_serl' && <HilObservationCropDialog environment={draft.environment}
+            crops={draft.camera_crops} size={draft.image_size || 128} disabled={busy}
+            onChange={value => update('camera_crops', value)} />}
           <fieldset disabled={busy} className="hil-fields">
             {field('camera_topic', 'Camera topic', { required: true, maxLength: 256 })}
             {field('joint_state_topic', 'Joint state topic', { required: true, maxLength: 256 })}
@@ -294,7 +302,7 @@ export default function HilSerlPage() {
             {field('classifier_hold_steps', 'Classifier consecutive success steps', { type: 'number', min: 1, max: 100 })}
             {field('checkpoint_path', 'Initial checkpoint path (optional)', { maxLength: 512 })}
           </fieldset>
-          <p className="hil-help">Isaac pixel mode uses fresh images captured after each physics step, independently of preview quality. Camera topics are reserved for future ROS integration. Legacy state datasets and checkpoints cannot be loaded into pixel mode. Isaac success uses the peg’s assembled asset pose; the insertion-depth field applies only to Mock. Load policy.npz or replay.npz from a stopped session; paths must be under the HIL data directory. Evaluation requires a policy checkpoint.</p>
+          <p className="hil-help">Simulator pixel mode uses fresh images captured after each physics step, independently of preview quality. Camera topics are reserved for future ROS integration. Legacy state datasets and checkpoints cannot be loaded into pixel mode. Simulator success uses the peg’s assembled asset pose; the insertion-depth field applies only to Mock. Load policy.npz or replay.npz from a stopped session; paths must be under the HIL data directory. Evaluation requires a policy checkpoint.</p>
           <div className="hil-actions"><button className="hil-primary" type="submit" disabled={busy || !dirty}>Save configuration</button>
             <button type="button" disabled={busy} onClick={() => run(() => refresh(true))}>Reload saved configuration</button></div>
         </form>
@@ -302,38 +310,40 @@ export default function HilSerlPage() {
           <HilGpuInventory hardware={workspace.readiness.hardware} />
           <h2>Runtime readiness</h2><p className="hil-help">Status for the saved configuration</p>
           <button type="button" disabled={busy} onClick={() => { setDraft((value) => ({ ...value, environment: 'isaac_sim', robot_type: 'ffw_sg2_rev1', control_hz: 20, target_part: value.target_part || 'peg_round_8', translation_limit_m: Math.min(value.translation_limit_m, 0.02), rotation_limit_rad: Math.min(value.rotation_limit_rad, 0.15) })); setDirty(true); }}>Use Isaac NIST settings</button>
-          {workspace.readiness.bridge?.busy && <p className="hil-help">Isaac simulator is leased by an active session.</p>}
+          <button type="button" disabled={busy} onClick={() => { setDraft((value) => ({ ...value, environment: 'mujoco', robot_type: 'ffw_sg2_rev1', control_hz: 20, initialization: 'near_hole', target_part: value.target_part || 'peg_round_8', classifier_path: '', demonstration_path: '', checkpoint_path: '', reward_source: 'environment', camera_crops: {}, translation_limit_m: Math.min(value.translation_limit_m, 0.02), rotation_limit_rad: Math.min(value.rotation_limit_rad, 0.15) })); setDirty(true); }}>Use MuJoCo NIST settings</button>
+          {workspace.readiness.bridge?.busy && <p className="hil-help">Simulator is leased by an active session.</p>}
           {workspace.readiness.checks.map((check) => <div key={check.id} className="hil-check"><span className={`hil-dot ${check.ready ? 'ready' : ''}`}  /><div><strong>{check.label}</strong><p>{check.detail}</p></div></div>)}
           <div className="hil-actions hil-stack"><button className="hil-primary" disabled={busy || dirty || configStale || active || !workspace.readiness.can_preview} onClick={() => create('preview')}>Create preview session</button>
             <button disabled={busy || dirty || configStale || active || !workspace.readiness.can_classifier} onClick={() => create('classifier')}>Get classifier data</button>
             <button disabled={busy || dirty || configStale || active || !workspace.readiness.can_demo} onClick={() => create('demo')}>Get demo</button>
             <button disabled={busy || dirty || configStale || active || !workspace.readiness.can_train} onClick={() => create('train')}>Create {environmentLabel} training session</button>
             <button disabled={busy || dirty || configStale || active || !workspace.readiness.can_evaluate} onClick={() => create('evaluate')}>Create {environmentLabel} evaluation session</button></div>
-          <p className="hil-help">{configStale ? 'Configuration changed elsewhere. Reload saved configuration before creating a session.' : dirty ? 'Save or reload your changes before creating a session.' : active ? 'An existing session must be stopped before creating another.' : draft.environment === 'isaac_sim' ? 'Preview starts the simulator with manual controls and no learning. Collection sessions use the smaller of the training and collection episode limits.' : 'Preview lets you test pause, takeover, episode labels and reset.'}</p>
+          <p className="hil-help">{configStale ? 'Configuration changed elsewhere. Reload saved configuration before creating a session.' : dirty ? 'Save or reload your changes before creating a session.' : active ? 'An existing session must be stopped before creating another.' : simulated(draft.environment) ? 'Preview starts the simulator with manual controls and no learning. Collection sessions use the smaller of the training and collection episode limits.' : 'Preview lets you test pause, takeover, episode labels and reset.'}</p>
         </aside>
       </div> : tab === 'session' ? <div className="hil-layout hil-session-layout">
         <section className="hil-card">
           {!session ? <div className="hil-empty"><h2>No sessions yet</h2><p>Save your experiment settings, then create a Preview session.</p><button onClick={() => setTab('setup')}>Go to experiment setup</button></div> : <>
             <div className="hil-card-heading"><div><h2>{session.config.name}</h2><p className="hil-help">{session.mode} · {session.config.environment} · {robots[session.config.robot_type]} · {session.config.arm} arm · config v{session.config_revision}</p></div><span className="hil-badge">{session.state}</span></div>
             <div className="hil-episode-progress">
-              <label htmlFor="hil-episode-step">Episode {session.episode} · {episodeStep} / {session.config.max_episode_steps} steps</label>
-              <progress id="hil-episode-step" aria-label="Episode steps" max={session.config.max_episode_steps} value={Math.min(episodeStep, session.config.max_episode_steps)} />
+              <label htmlFor="hil-episode-step">Episode {session.episode} · {episodeStep} / {episodeStepLimit} steps{session.mode === 'classifier' ? (session.runtime?.collection?.success_only ? ' · Success-only collection' : ' · Failure collection window') : ''}</label>
+              <progress id="hil-episode-step" aria-label="Episode steps" max={episodeStepLimit} value={Math.min(episodeStep, episodeStepLimit)} />
               {session.runtime_pending && <span>Initializing / waiting for simulator…</span>}
             </div>
-            <div className="hil-metrics">
+            {session.mode === 'train' && <HilTrainingMonitor key={session.id} session={session} />}
+            {session.mode !== 'train' && <div className="hil-metrics">
               {[['Episode', session.episode], ['Environment steps', session.metrics.environment_steps], ['Learner steps', session.metrics.learner_steps], ['Success rate', session.metrics.success_rate], ['Policy version', session.metrics.policy_version], ['Replay size', session.metrics.replay_size], ['Human steps', session.metrics.human_steps], ['Critic loss', session.metrics.critic_loss == null ? null : session.metrics.critic_loss.toFixed(4)]].map(([label, value]) => <div key={label}><span>{label}</span><strong>{display(value)}</strong></div>)}
-            </div>
+            </div>}
             <div className="hil-session-split"><section className="hil-episode-pane" aria-label="Episode and policy">
             {session.mode === 'preview' && !physicalPreview ? <p className="hil-help">Learning metrics remain unavailable in Preview. Episode labels below are workflow checks, not measured results.</p> : <>
               <p className="hil-help">{session.runtime_pending ? 'Waiting for runtime acknowledgement…' : session.runtime?.transport || 'Runtime starts when you press Start.'}{physicalPreview ? ` · Manual ${session.mode}: no policy actions or learning. Use the controls below.` : ` · Learner warms up after ${session.config.learning_backend === 'hil_serl' ? session.config.training_starts : (session.runtime?.effective_batch_size ?? (session.config.observation_mode === 'pixels' ? session.config.pixel_batch_size : session.config.batch_size))} online transitions${session.config.learning_backend === 'hil_serl' ? ' and at least one demo/intervention transition' : ''}. Natural episode endings reset automatically.`}</p>
               {session.runtime_error && <pre role="alert" className="hil-error">{session.runtime_error}</pre>}
               {session.runtime && <div className="hil-mock-view">
                 <h2>{sessionLabel} peg position</h2>
-                {isaacSession && <p className="hil-help">Initial state: {session.runtime.environment_info?.initialization !== 'kit' ? (session.runtime.environment_info?.grasp_verified ? 'Grasp verified at reset' : 'Grasp verification pending') : 'Kit tray'} · {session.config.arm} arm · {session.config.target_part}</p>}<p>XYZ (m): {session.runtime.position_m?.map((v) => v.toFixed(4)).join(' / ')}</p>
+                {simulatorSession && <p className="hil-help">Initial state: {session.runtime.environment_info?.initialization !== 'kit' ? (session.runtime.environment_info?.grasp_verified ? 'Grasp verified at reset' : 'Grasp verification pending') : 'Kit tray'} · {session.config.arm} arm · {session.config.target_part}</p>}<p>XYZ (m): {session.runtime.position_m?.map((v) => v.toFixed(4)).join(' / ')}</p>
                 <svg viewBox="0 0 220 220" role="img" aria-label="Peg XY telemetry relative to target hole">
-                  <rect x={isaacSession ? 62 : 10} y={isaacSession ? 62 : 10} width={isaacSession ? 96 : 200} height={isaacSession ? 96 : 200} rx="8" fill="#cbd5e1" />
+                  <rect x={simulatorSession ? 62 : 10} y={simulatorSession ? 62 : 10} width={simulatorSession ? 96 : 200} height={simulatorSession ? 96 : 200} rx="8" fill="#cbd5e1" />
                   <circle cx={110 + (session.runtime.environment_info?.target_position_m?.[0] || 0) * 250} cy={110 - (session.runtime.environment_info?.target_position_m?.[1] || 0) * 250} r="8" fill="#334155" />
-                  <circle cx={110 + (session.runtime.position_m?.[0] || 0) * (isaacSession ? 250 : 1800)} cy={110 - (session.runtime.position_m?.[1] || 0) * (isaacSession ? 250 : 1800)} r="5" fill="#2563eb" />
+                  <circle cx={110 + (session.runtime.position_m?.[0] || 0) * (simulatorSession ? 250 : 1800)} cy={110 - (session.runtime.position_m?.[1] || 0) * (simulatorSession ? 250 : 1800)} r="5" fill="#2563eb" />
                 </svg>
                 <p className="hil-help">XY telemetry: blue peg, dark target. Updates while running; not a rendered camera view. {session.runtime.schema}</p>
                 {!physicalPreview && <p className="hil-help">Artifacts are finalized on Stop.<br />Policy: <code>{session.runtime.checkpoint_path}</code><br />Replay{session.runtime.compute?.learner?.placement === 'remote' ? ' (external server)' : ''}: <code>{session.runtime.dataset_path}</code></p>}
@@ -343,10 +353,18 @@ export default function HilSerlPage() {
             <HilActionTelemetry session={session} axes={manualAxes} />
             <div className="hil-actions">
               <button className="hil-primary" disabled={startDisabled} onClick={startRuntime}>{session.mode === 'preview' ? 'Start preview' : `Start ${restartCollection ? environmentLabel : sessionLabel} runtime`}</button>
+              {session.mode === 'train' && session.state === 'stopped' && session.config.learning_backend === 'hil_serl' && <button
+                disabled={busy || session.runtime_pending || active || !session.runtime?.artifacts_saved || !!session.runtime_error}
+                onClick={() => run(async () => {
+                  const created = await restartHilTraining(session);
+                  setSelectedId(created.id); await refresh();
+                  setNotice('Resume session created. Press Start to load Learner, replay and counters.');
+                })}>Resume saved training</button>}
               <button disabled={busy || session.runtime_pending || session.state !== 'running'} onClick={() => command('pause')}>Pause</button>
               <button disabled={busy || session.runtime_pending || session.state !== 'paused' || session.episode_outcome !== null} onClick={() => command('resume')}>Resume</button>
               <button className="hil-danger" disabled={busy || session.state === 'stopped'} onClick={() => command('stop')}>{session.mode === 'preview' ? 'Stop preview' : 'Stop & save artifacts'}</button>
             </div>
+            {session.resume && <p className="hil-help">Resuming training from {session.resume.session_id}: Learner, online/demo replay and cumulative counters are restored. The simulator begins a new episode from its initial pose.</p>}
             {restartCollection && <p className="hil-help">Start creates a new classifier collection using the saved configuration, with counts starting at zero. Previous datasets are preserved.{dirty || configStale ? ' Save or reload configuration in Experiment setup first.' : active ? ' Stop the other active session first.' : !workspace.readiness.can_classifier ? ' Waiting for runtime readiness and simulator release.' : ''}</p>}
             </section><section className="hil-intervention-pane" aria-label="Human intervention panel">
             <div className="hil-control"><div><h2>Human intervention</h2><p>Control source: <strong>{physicalPreview && session.control_source === 'policy' ? `Hold (${session.mode} · policy disabled)` : session.control_source}</strong></p></div>
@@ -354,9 +372,9 @@ export default function HilSerlPage() {
             </div>
             <HilCollectionControls spaceToggle={spaceToggle} setSpaceToggle={setSpaceToggle} labelSuccessActive={labelSuccessActive} session={session} busy={busy} command={command} />
             {session.mode === 'demo' && <HilDemoData workspace={workspace} task={session.config} busy={busy} run={run} refresh={refresh} applyArtifact={applyArtifact} prepareDemoTraining={prepareDemoTraining} />}
-            <HilPressedKeys spaceToggle={spaceToggle} collecting={session.mode === 'classifier'} pressed={pressedKeys} enabled={keyboardEnabled} isaac={isaacSession} />
-            {keyboardEnabled && <p className="hil-keyboard-help">Keyboard active · {isaacSession ? 'TCP frame' : 'XYZ frame'} · W/S: ±X · A/D: ±Y · R/F: ±Z{isaacSession && ' · Q/E: roll · ↑/↓: pitch · ←/→: yaw · Gripper fixed'} · {session.mode === 'classifier' ? (spaceToggle ? 'Space: toggle success/failure · Esc: clear success and release input.' : 'Hold Space: success each step · Release Space: failure each step · Esc: release input.') : 'Space/Esc: release input.'} Release keys or leave the window to return to policy (Preview holds position).</p>}
-            {isaacSession && <p className="hil-help">Keyboard target per simulation step: XYZ ±{(session.config.translation_limit_m * 1000).toFixed(1)} mm; rotation ±{session.config.rotation_limit_rad} rad ({(session.config.rotation_limit_rad * 180 / Math.PI).toFixed(2)}°); gripper fixed at its initialized grasp target. Repeats while held at up to {session.config.control_hz} steps/s; actual motion depends on IK, joint limits and contact. Keyboard pulses refresh every 100 ms.</p>}
+            <HilPressedKeys spaceToggle={spaceToggle} collecting={session.mode === 'classifier'} pressed={pressedKeys} enabled={keyboardEnabled} isaac={simulatorSession} />
+            {keyboardEnabled && <p className="hil-keyboard-help">Keyboard active · {simulatorSession ? 'TCP frame' : 'XYZ frame'} · W/S: ±X · A/D: ±Y · R/F: ±Z{simulatorSession && ' · Q/E: roll · ↑/↓: pitch · ←/→: yaw · Gripper fixed'} · {session.mode === 'classifier' ? (spaceToggle ? 'Space: toggle success/failure · Esc: clear success and release input.' : 'Hold Space: success each step · Release Space: failure each step · Esc: release input.') : 'Space/Esc: release input.'} Release keys or leave the window to return to policy (Preview holds position).</p>}
+            {simulatorSession && <p className="hil-help">Keyboard target per simulation step: XYZ ±{(session.config.translation_limit_m * 1000).toFixed(1)} mm; rotation ±{session.config.rotation_limit_rad} rad ({(session.config.rotation_limit_rad * 180 / Math.PI).toFixed(2)}°); gripper fixed at its initialized grasp target. Repeats while held at up to {session.config.control_hz} steps/s; actual motion depends on IK, joint limits and contact. Keyboard pulses refresh every 100 ms.</p>}
             {session.runtime?.environment_info?.motion_blocked && <p className="hil-help" role="status">Movement blocked: {session.runtime.environment_info.motion_block_joint || session.runtime.environment_info.motion_block_reason}. Move in another direction to leave the limit.</p>}
             {(session.mode !== 'preview' || physicalPreview) && <div className="hil-actions" aria-label="Manual action controls">
               {manualAxes.flatMap((axis, index) => [1, -1].map((sign) => {
@@ -382,7 +400,7 @@ export default function HilSerlPage() {
           {workspace.sessions.length === 0 && <p className="hil-help">Your sessions will appear here.</p>}
         </aside>
       </div> : null}
-    {tab === 'classifier' && <HilDataLibrary workspace={workspace} busy={busy} run={run} refresh={refresh} applyArtifact={applyArtifact} prepareDemoTraining={prepareDemoTraining} />}
+    {tab === 'classifier' && <HilDataLibrary workspace={workspace} busy={busy} run={run} refresh={refresh} applyArtifact={applyArtifact} />}
     </>}
   </div>;
 }

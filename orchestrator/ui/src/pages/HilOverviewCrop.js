@@ -14,7 +14,7 @@ export function cropRectangle(a, b) {
   return { x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), width: Math.abs(a.x - b.x), height: Math.abs(a.y - b.y) };
 }
 
-export default function HilOverviewCrop({ frame, label }) {
+export default function HilOverviewCrop({ frame, label, simulationLabel = 'Isaac' }) {
   const clipId = useId();
   const [view, setView] = useState(FULL_VIEW);
   const [selection, setSelection] = useState(null);
@@ -49,7 +49,7 @@ export default function HilOverviewCrop({ frame, label }) {
           if (end) setSelection(cropRectangle(drag.current.start, end));
         }} onPointerUp={finish} onPointerCancel={cancel} onLostPointerCapture={cancel}>
         <defs><clipPath id={clipId}><rect {...view} /></clipPath></defs>
-        <foreignObject clipPath={`url(#${clipId})`} x="0" y="0" width="4" height="3"><img src={frame} alt={`Live Isaac simulation · ${label}`} draggable={false} /></foreignObject>
+        <foreignObject clipPath={`url(#${clipId})`} x="0" y="0" width="4" height="3"><img src={frame} alt={`Live ${simulationLabel} simulation · ${label}`} draggable={false} /></foreignObject>
         {selection && <rect {...selection} className="hil-crop-selection" />}
       </svg>
     </div>

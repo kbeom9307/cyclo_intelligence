@@ -47,14 +47,15 @@ def test_hardware_workflow_preview_does_not_allow_real_execution(client):
 
 def test_config_validation_revision_and_session_snapshot(client):
     session = create(client)
+    original_hz = session['config']['control_hz']
     config = client.get('/hilserl/workspace').json()['config']
     config['control_hz'] = 0
     assert client.put('/hilserl/config', json={'expected_revision': 0, 'config': config}).status_code == 422
-    config['control_hz'] = 20
+    config['control_hz'] = 25
     assert client.put('/hilserl/config', json={'expected_revision': 0, 'config': config}).status_code == 200
     assert client.put('/hilserl/config', json={'expected_revision': 0, 'config': config}).status_code == 409
-    assert client.get(f"/hilserl/sessions/{session['id']}").json()['config']['control_hz'] == 10
-    assert client.get('/hilserl/workspace').json()['config']['control_hz'] == 20
+    assert client.get(f"/hilserl/sessions/{session['id']}").json()['config']['control_hz'] == original_hz
+    assert client.get('/hilserl/workspace').json()['config']['control_hz'] == 25
 
 
 def test_preview_lifecycle_and_metrics_are_not_simulated(client):
@@ -140,8 +141,17 @@ def test_agentlace_training_intervention_checkpoint_and_evaluation(client, tmp_p
         pytest.fail(f'Runtime timeout: {current}')
 
     def send(command):
-        current = wait(lambda s: not s.get('runtime_pending'))
-        response = action(client, current, command)
+        deadline = time.monotonic() + 25
+        while True:
+            current = wait(lambda s: not s.get('runtime_pending'))
+            response = action(client, current, command)
+            # An automatic episode reset can start between the status read and
+            # command POST. Retry this documented transient conflict only.
+            if (response.status_code != 409 or response.json().get('detail') !=
+                    'Wait for the runtime to acknowledge the previous command' or
+                    time.monotonic() >= deadline):
+                break
+            time.sleep(.05)
         assert response.status_code == 200, response.text
         return wait(lambda s: not s.get('runtime_pending'))
 

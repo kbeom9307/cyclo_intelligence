@@ -1,0 +1,455 @@
+{
+  "date": "2026-10-20",
+  "environment": "mujoco",
+  "engine": "MuJoCo 3.16.0 / CPU physics / EGL GPU rendering",
+  "robot": "FFW-SG2 rev1",
+  "robot_asset_commit": "d8344c0dbe7a00208d0301111523dde65efc174a",
+  "physics": {
+    "timestep_s": 0.002,
+    "substeps": 25,
+    "control_hz": 20,
+    "round_hole_diameter_clearance_mm": 0.5,
+    "gripper": "fixed with physical friction contact; no weld",
+    "start": "near hole, already grasped"
+  },
+  "cameras": {
+    "spectator": [
+      1920,
+      1440
+    ],
+    "head": [
+      640,
+      360
+    ],
+    "left_wrist": [
+      640,
+      360
+    ],
+    "right_wrist": [
+      640,
+      360
+    ],
+    "learning_image_shape": [
+      9,
+      128,
+      128
+    ],
+    "proprioception_dim": 22,
+    "action_dim": 6
+  },
+  "tests": {
+    "physics": {
+      "passed": 7,
+      "scope": "hole collision geometry, free grasp/idle, Cartesian motion, insertion success, joint limits, truncation, world-frame object velocity"
+    },
+    "supervisor_api": {
+      "passed": 53,
+      "skipped": 28,
+      "note": "Hardware/GPU opt-in tests skipped in default suite; MuJoCo opt-in runs listed separately."
+    },
+    "ui": {
+      "passed": 55,
+      "suites": 8,
+      "final_affected_suites_passed": 4,
+      "final_affected_tests_passed": 35,
+      "production_build": "passed"
+    },
+    "upstream_gpu_integration": {
+      "passed": 1,
+      "scope": "real MuJoCo RGB observations, upstream CUDA actor/classifier, collection and demo artifacts"
+    },
+    "lab_runtime_integration": {
+      "passed": 1,
+      "scope": "API/subprocess manual control, automatic negative labels, positive target auto-stop"
+    },
+    "gpu_reward_runtime": "passed: reward 1 ends episode and saves policy; synthetic positive classifier tests control flow, not accuracy",
+    "browser_click_validation": false,
+    "browser_note": "No enabled browser surface; deployed HTTP endpoints and component tests were used."
+  },
+  "gpu": "NVIDIA GeForce RTX 5070 Laptop GPU",
+  "physical_vram_mib": 8151,
+  "vram_measurement": {
+    "scope": "Total GPU memory reported by nvidia-smi, including background baseline; learner not running",
+    "four_views_idle_used_mib": 438,
+    "four_views_actor_classifier_peak_used_mib": 854,
+    "four_views_actor_classifier_min_free_mib": 6853,
+    "polling": "Overview ultra 1920x1440 and three robot views 640x360 through deployed Lab API",
+    "samples": [
+      {
+        "seconds": 0.09,
+        "used_mib": 246,
+        "free_mib": 7461,
+        "busy": false,
+        "overview_rendering": false
+      },
+      {
+        "seconds": 1.12,
+        "used_mib": 438,
+        "free_mib": 7268,
+        "busy": false,
+        "overview_rendering": true
+      },
+      {
+        "seconds": 2.18,
+        "used_mib": 438,
+        "free_mib": 7268,
+        "busy": false,
+        "overview_rendering": true
+      },
+      {
+        "seconds": 3.24,
+        "used_mib": 438,
+        "free_mib": 7268,
+        "busy": false,
+        "overview_rendering": true
+      },
+      {
+        "seconds": 4.3,
+        "used_mib": 438,
+        "free_mib": 7268,
+        "busy": false,
+        "overview_rendering": true
+      },
+      {
+        "seconds": 5.36,
+        "used_mib": 438,
+        "free_mib": 7268,
+        "busy": false,
+        "overview_rendering": true
+      },
+      {
+        "seconds": 6.41,
+        "used_mib": 438,
+        "free_mib": 7268,
+        "busy": false,
+        "overview_rendering": true
+      },
+      {
+        "seconds": 7.46,
+        "used_mib": 438,
+        "free_mib": 7268,
+        "busy": false,
+        "overview_rendering": true
+      },
+      {
+        "seconds": 8.51,
+        "used_mib": 438,
+        "free_mib": 7268,
+        "busy": false,
+        "overview_rendering": true
+      },
+      {
+        "seconds": 9.56,
+        "used_mib": 438,
+        "free_mib": 7268,
+        "busy": false,
+        "overview_rendering": true
+      },
+      {
+        "seconds": 10.62,
+        "used_mib": 438,
+        "free_mib": 7268,
+        "busy": false,
+        "overview_rendering": true
+      },
+      {
+        "seconds": 11.67,
+        "used_mib": 438,
+        "free_mib": 7268,
+        "busy": false,
+        "overview_rendering": true
+      },
+      {
+        "seconds": 12.72,
+        "used_mib": 438,
+        "free_mib": 7268,
+        "busy": false,
+        "overview_rendering": true
+      },
+      {
+        "seconds": 13.77,
+        "used_mib": 438,
+        "free_mib": 7268,
+        "busy": false,
+        "overview_rendering": true
+      },
+      {
+        "seconds": 14.83,
+        "used_mib": 598,
+        "free_mib": 7109,
+        "busy": true,
+        "overview_rendering": true
+      },
+      {
+        "seconds": 15.87,
+        "used_mib": 598,
+        "free_mib": 7109,
+        "busy": true,
+        "overview_rendering": true
+      },
+      {
+        "seconds": 16.93,
+        "used_mib": 598,
+        "free_mib": 7109,
+        "busy": true,
+        "overview_rendering": true
+      },
+      {
+        "seconds": 17.98,
+        "used_mib": 598,
+        "free_mib": 7109,
+        "busy": true,
+        "overview_rendering": true
+      },
+      {
+        "seconds": 19.02,
+        "used_mib": 598,
+        "free_mib": 7109,
+        "busy": true,
+        "overview_rendering": true
+      },
+      {
+        "seconds": 20.07,
+        "used_mib": 852,
+        "free_mib": 6855,
+        "busy": true,
+        "overview_rendering": true
+      },
+      {
+        "seconds": 21.12,
+        "used_mib": 852,
+        "free_mib": 6855,
+        "busy": true,
+        "overview_rendering": true
+      },
+      {
+        "seconds": 22.17,
+        "used_mib": 852,
+        "free_mib": 6855,
+        "busy": true,
+        "overview_rendering": true
+      },
+      {
+        "seconds": 23.22,
+        "used_mib": 854,
+        "free_mib": 6853,
+        "busy": true,
+        "overview_rendering": true
+      },
+      {
+        "seconds": 24.28,
+        "used_mib": 854,
+        "free_mib": 6853,
+        "busy": true,
+        "overview_rendering": true
+      },
+      {
+        "seconds": 25.33,
+        "used_mib": 854,
+        "free_mib": 6853,
+        "busy": false,
+        "overview_rendering": true
+      },
+      {
+        "seconds": 26.38,
+        "used_mib": 438,
+        "free_mib": 7268,
+        "busy": false,
+        "overview_rendering": true
+      },
+      {
+        "seconds": 27.44,
+        "used_mib": 438,
+        "free_mib": 7268,
+        "busy": false,
+        "overview_rendering": true
+      },
+      {
+        "seconds": 28.5,
+        "used_mib": 438,
+        "free_mib": 7268,
+        "busy": false,
+        "overview_rendering": true
+      },
+      {
+        "seconds": 29.56,
+        "used_mib": 438,
+        "free_mib": 7268,
+        "busy": false,
+        "overview_rendering": true
+      },
+      {
+        "seconds": 30.61,
+        "used_mib": 438,
+        "free_mib": 7268,
+        "busy": false,
+        "overview_rendering": true
+      },
+      {
+        "seconds": 31.67,
+        "used_mib": 438,
+        "free_mib": 7268,
+        "busy": false,
+        "overview_rendering": true
+      },
+      {
+        "seconds": 32.74,
+        "used_mib": 438,
+        "free_mib": 7268,
+        "busy": false,
+        "overview_rendering": true
+      },
+      {
+        "seconds": 33.8,
+        "used_mib": 438,
+        "free_mib": 7268,
+        "busy": false,
+        "overview_rendering": true
+      },
+      {
+        "seconds": 34.85,
+        "used_mib": 438,
+        "free_mib": 7268,
+        "busy": false,
+        "overview_rendering": true
+      },
+      {
+        "seconds": 35.91,
+        "used_mib": 438,
+        "free_mib": 7268,
+        "busy": false,
+        "overview_rendering": true
+      },
+      {
+        "seconds": 36.96,
+        "used_mib": 438,
+        "free_mib": 7268,
+        "busy": false,
+        "overview_rendering": true
+      },
+      {
+        "seconds": 38.01,
+        "used_mib": 438,
+        "free_mib": 7268,
+        "busy": false,
+        "overview_rendering": true
+      },
+      {
+        "seconds": 39.06,
+        "used_mib": 438,
+        "free_mib": 7268,
+        "busy": false,
+        "overview_rendering": true
+      }
+    ]
+  },
+  "gpu_inference": {
+    "environment": "mujoco",
+    "image_shape": [
+      9,
+      128,
+      128
+    ],
+    "schema": "nist-sg2-rgb3x128-proprio22-delta6-fixed-hilserl-v1",
+    "warm_actor_classifier_ms": 28.14881701488048,
+    "actor_memory": {
+      "device": "cuda:0",
+      "framework": "JAX",
+      "name": "NVIDIA GeForce RTX 5070 Laptop GPU",
+      "allocated_mib": 144.1,
+      "reserved_mib": 254.0,
+      "peak_allocated_mib": 153.4,
+      "allocator_limit_mib": 6935.2,
+      "free_mib": 7045.0,
+      "total_mib": 8151.0
+    },
+    "hardware": {
+      "gpus": [
+        {
+          "device": "cuda:0",
+          "name": "NVIDIA GeForce RTX 5070 Laptop GPU",
+          "total_mib": 8151.0,
+          "used_mib": 661.0,
+          "free_mib": 7045.0
+        }
+      ],
+      "error": null
+    },
+    "grasp_drift_m": 1.1941441161492926e-05
+  },
+  "gpu_reward_runtime": {
+    "state": "stopped",
+    "artifacts_saved": true,
+    "episodes": 1,
+    "image_shape": [
+      9,
+      128,
+      128
+    ],
+    "compute": {
+      "actor_device": "cuda:0",
+      "actor_memory": {
+        "device": "cuda:0",
+        "framework": "JAX",
+        "name": "NVIDIA GeForce RTX 5070 Laptop GPU",
+        "allocated_mib": 132.9,
+        "reserved_mib": 254.0,
+        "peak_allocated_mib": 177.7,
+        "allocator_limit_mib": 6935.2,
+        "free_mib": 6853.0,
+        "total_mib": 8151.0
+      },
+      "learner": {},
+      "shared_process": false
+    }
+  },
+  "collection_runtime": {
+    "preview_manual_control": true,
+    "classifier_auto_stop": true,
+    "positive_samples": 2,
+    "total_samples": 4
+  },
+  "idle_retention_benchmark": {
+    "simulated_seconds": 500,
+    "peg_displacement_mm": [
+      -0.03657,
+      0.00669,
+      -0.11153
+    ],
+    "note": "Physical contact with noslip_iterations=4; no kinematic peg attachment."
+  },
+  "deployment": {
+    "mujoco_image": "cyclo-mujoco-nist:local",
+    "mujoco_image_id": "sha256:3f562a0fb8828f3336f26a8b46a300b66d12786fcf9597ddc143a267fb04b026",
+    "main_image": "cyclo-intelligence:mujoco-20261020",
+    "configuration_revision": 11,
+    "configuration_backup": "/workspace/hilserl/config_backups/before-mujoco-20261020T064251Z-v10.json",
+    "learner_placement": "remote",
+    "external_host_connected": false,
+    "ui_bundle": "main.acb7c7ba.js",
+    "preview": {
+      "id": "66aff97e-3ecb-4b94-a6d3-8002245bf60f",
+      "state": "running",
+      "environment": "mujoco",
+      "mode": "preview",
+      "episode_step": 6,
+      "policy_enabled": false,
+      "grasp_verified": true,
+      "image_shape": [
+        9,
+        128,
+        128
+      ]
+    },
+    "main_image_id": "sha256:b646c54f477ed9be788c656bc28e6f60dc046ea16e48f639c2f11464d20fbc0d",
+    "main_image_note": "Built from the previously validated HIL-SERL runtime image plus the new production UI; supervisor source is bind-mounted by the existing Compose configuration."
+  },
+  "limitations": [
+    "This is a MuJoCo contact model, not a numerical replica of PhysX or validated sim-to-real dynamics.",
+    "Near-hole fixed-gripper peg insertion only; tray pick-and-place and non-peg manipulation are not implemented.",
+    "Square-8 starts for either arm and round-16 starts for the left arm are excluded due to validated reach limits.",
+    "Existing Isaac artifacts remain preserved under their environment identity. Collect new MuJoCo images/demos before training.",
+    "Original HIL-SERL image size, batch 256 and CTA 2 are retained. Full learner training alongside simulator/actor on the 8 GiB GPU was not measured; remote learner remains configured but unconnected.",
+    "Previous isolated learner measurement was 7118 MiB at batch 256; inference results here do not predict training memory or trained-policy success."
+  ]
+}

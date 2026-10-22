@@ -21,6 +21,23 @@ class DiskBank:
                                                    shape=(capacity, *shape))
                        for k, (shape, dtype) in shapes.items()}
 
+    def restore(self, source):
+        source = Path(source)
+        index = json.loads((source / 'index.json').read_text())
+        if index.get('format') != 'cyclo-memmap-replay-v1' or index['capacity'] != self.capacity:
+            raise ValueError('Replay capacity or format mismatch')
+        size, cursor = index['size'], index['cursor']
+        if not (0 <= size <= self.capacity and 0 <= cursor < self.capacity) or (size < self.capacity and cursor != size):
+            raise ValueError('Invalid replay size/cursor')
+        for key, destination in self.arrays.items():
+            data = np.load(source / f'{key}.npy', mmap_mode='r', allow_pickle=False)
+            if data.shape != destination.shape or data.dtype != destination.dtype:
+                raise ValueError(f'Replay array mismatch: {key}')
+            # Copy populated slots only; preserve sparse allocation and ring positions.
+            for begin in range(0, size, 32):
+                destination[begin:min(begin + 32, size)] = data[begin:min(begin + 32, size)]
+        self.size, self.cursor = size, cursor
+
     def insert(self, row):
         for key, array in self.arrays.items():
             array[self.cursor] = row.get(key, False)
@@ -76,7 +93,19 @@ class DiskReplay(DataStoreBase):
     def ready(self, training_starts):
         return self.online.size >= training_starts and self.demo.size > 0
 
+    def restore(self, source):
+        source = Path(source)
+        self.online.restore(source / 'online')
+        self.demo.restore(source / 'demonstrations')
+        state = source / 'state.json'
+        if state.exists():
+            saved = json.loads(state.read_text())
+            self.rng.bit_generator.state = saved['rng']
+        # Transport sequence IDs belong to the new Agentlace connection.
+        self.latest_seq_id = -1
+
     def save(self):
         with self.sample_lock:
             self.online.save()
             self.demo.save()
+            (self.online.folder.parent / 'state.json').write_text(json.dumps({'rng': self.rng.bit_generator.state}))

@@ -107,9 +107,13 @@ class RemoteEndpoint:
         except OSError as exc:
             raise RuntimeError(f'Learner connection failed: {type(exc).__name__}') from None
 
-    def open(self, spec, weights=None):
+    def open(self, spec, weights=None, resume=None):
         self.pixel = spec['pixel']
-        result = json.loads(self.request('/runs', json.dumps(spec).encode(), 'application/json', timeout=300))
+        payload = dict(spec)
+        if resume:
+            payload['resume_run_id'] = resume['remote_run_id']
+            payload['resume_counts'] = resume['counters']
+        result = json.loads(self.request('/runs', json.dumps(payload).encode(), 'application/json', timeout=300))
         self.run_id = result['run_id']
         try:
             if weights:

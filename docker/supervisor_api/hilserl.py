@@ -15,10 +15,11 @@ import subprocess
 import sys
 import time
 from typing import Literal
-from uuid import uuid4
+from uuid import uuid4, UUID
 from hilserl_devices import hardware_status, device_ready
 from hilserl_remote import validate_url, RemoteEndpoint, PROTOCOL
 from threading import Lock
+import hilserl_mujoco as _mujoco
 
 # This module is also dynamically loaded by app.py and the contract tests.
 _isaac_spec = importlib.util.spec_from_file_location("hilserl_isaac", Path(__file__).with_name("hilserl_isaac.py"))
@@ -42,14 +43,14 @@ class StrictModel(BaseModel):
 
 class ExperimentConfig(StrictModel):
     name: str = Field(default="AI Worker · NIST peg insertion", min_length=1, max_length=120)
-    robot_type: Literal["ffw_bg2_rev4", "ffw_sg2_rev1", "ffw_sh5_rev1"] = "ffw_bg2_rev4"
-    environment: Literal["mock", "isaac_sim", "real_robot"] = "isaac_sim"
+    robot_type: Literal["ffw_bg2_rev4", "ffw_sg2_rev1", "ffw_sh5_rev1"] = "ffw_sg2_rev1"
+    environment: Literal["mock", "isaac_sim", "mujoco", "real_robot"] = "mujoco"
     board: Literal["nist_atb1"] = "nist_atb1"
     task: Literal["peg_insertion"] = "peg_insertion"
     arm: Literal["left", "right"] = "right"
     initialization: Literal["near_hole", "pick_place", "grasped", "kit"] = "near_hole"
     target_part: Literal["peg_round_4", "peg_round_8", "peg_round_12", "peg_round_16", "peg_square_4", "peg_square_8", "peg_square_12", "peg_square_16"] = "peg_round_8"
-    control_hz: int = Field(default=10, ge=1, le=50)
+    control_hz: int = Field(default=20, ge=1, le=50)
     seed: int = Field(default=0, ge=0, le=2147483647)
     learning_backend: Literal['hil_serl', 'legacy_torch'] = 'hil_serl'
     cta_ratio: int = Field(default=2, ge=1, le=16)
@@ -116,6 +117,7 @@ class ExperimentConfig(StrictModel):
     classifier_threshold: float = Field(default=.9, gt=0, lt=1)
     classifier_hold_steps: int = Field(default=3, ge=1, le=100)
     demonstration_path: str = Field(default="", max_length=512)
+    image_size: Literal[64, 128, 256] = 128
     checkpoint_path: str = Field(default="", max_length=512)
 
 
@@ -131,7 +133,7 @@ class CreateSession(StrictModel):
 
 class SessionCommand(StrictModel):
     expected_revision: int = Field(ge=0)
-    action: Literal["start", "pause", "resume", "stop", "take_over", "release", "success", "failure", "truncate", "reset", "capture_success", "capture_failure", "save_demo", "discard_demo"]
+    action: Literal["start", "pause", "resume", "stop", "take_over", "release", "success", "failure", "truncate", "reset", "capture_success", "capture_failure", "save_demo", "discard_demo", "discard_demo_as_failure"]
 
 
 class ManualAction(StrictModel):
@@ -149,7 +151,7 @@ def data_root():
 
 
 def uses_runtime(session):
-    return session['mode'] != 'preview' or session['config']['environment'] == 'isaac_sim'
+    return session['mode'] != 'preview' or session['config']['environment'] in ('isaac_sim', 'mujoco')
 
 
 def runtime_status(session):
@@ -167,6 +169,8 @@ def decorate(session):
     result = dict(session)
     status = runtime_status(session)
     process = _workers.get(session["id"])
+    result['dataset_finalizing'] = (session.get('mode') in ('classifier', 'demo') and session['state'] == 'stopped'
+                                    and process is not None and process.poll() is None)
     if status:
         result["runtime"] = status
         result["metrics"] = status.get("metrics", session["metrics"])
@@ -297,20 +301,23 @@ def check_learner(request: ExperimentConfig):
 
 
 def preflight(config):
-    from hilserl_profiles import upstream, pixel_schema, UPSTREAM_CLASSIFIER, runtime_python
+    from hilserl_profiles import upstream, pixel_schema, classifier_schema, image_shape, runtime_python
     mock = config["environment"] == "mock"
     deps = all(importlib.util.find_spec(name) is not None for name in ("agentlace", "torch", "numpy"))
     artifacts = all(artifact_ready(config[key]) for key in ("checkpoint_path", "demonstration_path"))
     classifier_ok = bool(config.get('classifier_path')) and artifact_ready(config.get('classifier_path', '')) and config.get('observation_mode') == 'pixels'
     reward = config["reward_source"] != "classifier" or classifier_ok
-    isaac = config['environment'] == 'isaac_sim'
-    bridge = _isaac.health() if isaac else {}
-    compatible = (isaac and bridge.get('ready', False) and config['robot_type'] == bridge.get('robot_type')
+    simulated = config['environment'] in ('isaac_sim', 'mujoco')
+    label = 'MuJoCo' if config['environment'] == 'mujoco' else 'Isaac Sim'
+    client = _mujoco if config['environment'] == 'mujoco' else _isaac
+    bridge = client.health() if simulated else {}
+    compatible = (simulated and bridge.get('ready', False) and config['robot_type'] == bridge.get('robot_type')
                   and config['control_hz'] == bridge.get('control_hz')
-                  and config.get('target_part', 'peg_round_8') in bridge.get('target_parts', [])
+                  and (config['environment'] != 'mujoco' or config['initialization'] in bridge.get('initializations', []))
+                  and config.get('target_part', 'peg_round_8') in bridge.get('target_parts_by_arm', {}).get(config['arm'], bridge.get('target_parts', []))
                   and config['translation_limit_m'] <= .02 and config['rotation_limit_rad'] <= .15)
     pixels = config.get('observation_mode', 'state') == 'pixels'
-    if isaac and pixels and upstream(config):
+    if simulated and pixels and upstream(config):
         try:
             runtime_python(config)
         except ValueError:
@@ -321,7 +328,9 @@ def preflight(config):
                 continue
             try:
                 with np.load(config[key], allow_pickle=False) as data:
-                    match = str(data['__schema__']) == (UPSTREAM_CLASSIFIER if key == 'classifier_path' else pixel_schema(config))
+                    match = str(data['__schema__']) == (classifier_schema(config) if key == 'classifier_path' else pixel_schema(config))
+                    from hilserl_data import task_key
+                    match = match and json.loads(str(data['__task__'])) == task_key(config)
                 if key == 'classifier_path':
                     classifier_ok = classifier_ok and match
                 else:
@@ -333,15 +342,15 @@ def preflight(config):
                     artifacts = False
         reward = config["reward_source"] != "classifier" or classifier_ok
     compatible = compatible and (not pixels or bridge.get('pixel_observations', False))
-    if isaac and pixels and upstream(config):
-        compatible = compatible and 128 in bridge.get('pixel_sizes', [])
+    if simulated and pixels and upstream(config):
+        compatible = compatible and image_shape(config)[1] in bridge.get('pixel_sizes', [])
     available = mock or compatible
     hardware = hardware_status()
     actor_device = config.get('actor_device', 'cuda:0')
     learner_device = config.get('learner_device', 'cuda:0')
     actor_ok = device_ready(actor_device, hardware)
     actor_memory_detail = ''
-    if isaac and pixels and upstream(config) and actor_device.startswith('cuda:'):
+    if simulated and pixels and upstream(config) and actor_device.startswith('cuda:'):
         actor_gpu = next((g for g in hardware['gpus'] if g['device'] == actor_device), {})
         if actor_ok and actor_gpu.get('free_mib', 0) < 512:
             actor_ok = False
@@ -350,38 +359,48 @@ def preflight(config):
     learner_hardware = learner_probe(config) if remote else hardware
     learner_ok = device_ready(learner_device, learner_hardware) and (not remote or (learner_hardware.get('connected') and not learner_hardware.get('busy')))
     memory_detail = ''
-    if isaac and pixels and upstream(config) and not remote and learner_device.startswith('cuda:') and config['pixel_batch_size'] >= 256:
+    if simulated and pixels and upstream(config) and not remote and learner_device.startswith('cuda:') and config['pixel_batch_size'] >= 256:
         gpu = next((g for g in hardware['gpus'] if g['device'] == learner_device), {})
-        if gpu.get('free_mib', 0) < 7300:
+        from hilserl_profiles import shared_mujoco_gpu, jax_memory_fraction
+        try:
+            combined = (shared_mujoco_gpu(config) and config['pixel_batch_size'] == 256
+                        and float(jax_memory_fraction(config)) <= .80)
+        except ValueError:
+            combined = False
+        minimum_mib = 6656 if combined else 7300
+        if gpu.get('free_mib', 0) < minimum_mib:
             learner_ok = False
-            memory_detail = ' · Restored batch 256 needs about 7 GiB of free VRAM for a local learner. Use an external GPU while Isaac runs on this 8 GiB device.'
+            memory_detail = (f' · Local batch 256 needs at least {minimum_mib / 1024:.1f} GiB free before starting'
+                             + (' with the shared MuJoCo GPU allocator.' if combined else '. Use an external GPU when memory is insufficient.'))
     checks = [
-        {"id": "environment", "label": "Isaac Sim NIST bridge" if isaac else "Mock peg environment" if mock else "Hardware adapter",
+        {"id": "environment", "label": f"{label} NIST bridge" if simulated else "Mock peg environment" if mock else "Hardware adapter",
          "ready": bool(available), "detail": (("Connected: 3 RGB cameras + 22 proprioception values / 6 actions; fixed gripper" if pixels else "Connected: FFW-SG2, 39 state observations / 6 actions; fixed gripper") if compatible else
-             bridge.get('error', 'Requires FFW-SG2, 20 Hz, translation ≤ 0.02 m, rotation ≤ 0.15 rad and an available target peg')) if isaac else
+             bridge.get('error', 'Requires FFW-SG2, 20 Hz, translation ≤ 0.02 m, rotation ≤ 0.15 rad and an available target peg')) if simulated else
              "State-based XYZ toy task" if mock else "Not connected"},
         {"id": "actor", "label": "Actor and command ownership", "ready": bool(available and deps and actor_ok),
-         "detail": "Leased simulator ownership / Cartesian + rotation control; fixed gripper" if isaac else "Mock policy / manual XYZ actions"},
+         "detail": "Leased simulator ownership / Cartesian + rotation control; fixed gripper" if simulated else "Mock policy / manual XYZ actions"},
         {"id": "learner", "label": "Agentlace / SAC / replay", "ready": bool(available and deps and artifacts and learner_ok),
          "detail": (f"{'External' if remote else 'Local'} SAC learner · {learner_device}" if learner_ok else learner_hardware.get('error') or f'{learner_device} unavailable, busy or insufficient free memory') + memory_detail + ('' if deps and artifacts else ' · Install dependencies and select artifacts compatible with this model/resolution')},
         {"id": "reward", "label": "Reward and reset", "ready": bool(available and reward),
-         "detail": "Simulator part pose / velocity / orientation and scene reset" if isaac and reward else "Environment reward or human labels" if reward else "Select a trained classifier checkpoint and pixel observations"},
+         "detail": "Simulator part pose / velocity / orientation and scene reset" if simulated and reward else "Environment reward or human labels" if reward else "Select a trained classifier checkpoint and pixel observations"},
     ]
     checks[1]['detail'] = f"Actor · {actor_device}" + (actor_memory_detail or ('' if actor_ok else ' unavailable; enable NVIDIA GPU access'))
-    if isaac and pixels:
+    if simulated and pixels:
         checks.append({'id': 'images', 'label': 'Synchronized RGB observations', 'ready': bool(bridge.get('pixel_observations')),
-                       'detail': ('128×128 ROI images; ImageNet ResNet-10 + 22 proprioception values' if upstream(config) else '64×64 legacy CNN + robot proprioception') if bridge.get('pixel_observations') else 'Start the bridge with visualization enabled for pixel observations'})
+                       'detail': (f'{image_shape(config)[1]}×{image_shape(config)[1]} ROI images; ImageNet ResNet-10 + 22 proprioception values' if upstream(config) else '64×64 legacy CNN + robot proprioception') if bridge.get('pixel_observations') else 'Start the bridge with visualization enabled for pixel observations'})
     ready = all(item["ready"] for item in checks) and not bridge.get('busy', False)
     collection_ready = bool(compatible and deps and pixels and not bridge.get('busy', False))
-    return {'can_classifier': collection_ready, 'can_demo': collection_ready and reward and (config['reward_source'] != 'classifier' or actor_ok), "can_preview": (bool(compatible and deps and not bridge.get("busy", False)) if isaac else True), "can_train": ready, "can_evaluate": all(item['ready'] for item in checks if item['id'] != 'learner') and artifacts and not bridge.get('busy', False) and bool(config["checkpoint_path"]), "checks": checks, "bridge": bridge, "hardware": hardware, "learner_hardware": learner_hardware}
+    return {'can_classifier': collection_ready, 'can_demo': collection_ready and reward and (config['reward_source'] != 'classifier' or actor_ok), "can_preview": (bool(compatible and deps and not bridge.get("busy", False)) if simulated else True), "can_train": ready, "can_evaluate": all(item['ready'] for item in checks if item['id'] != 'learner') and artifacts and not bridge.get('busy', False) and bool(config["checkpoint_path"]), "checks": checks, "bridge": bridge, "hardware": hardware, "learner_hardware": learner_hardware}
 
 
 @router.get("/workspace")
 def workspace():
     with database() as db:
         config = settings(db)
-        return {**config, "readiness": preflight(config["config"]), "sessions": [decorate(s) for s in sessions(db)],
-                "execution_support": "mock_and_isaac_pixel_sac", "data_library": data_library(), "classifier_jobs": classifier_jobs()}
+        stored_sessions = sessions(db)
+        names = collection_environment_names(stored_sessions)
+        return {**config, "readiness": preflight(config["config"]), "sessions": [decorate(s) for s in stored_sessions],
+                "execution_support": "mock_isaac_mujoco_pixel_sac", "data_library": data_library(names), "classifier_jobs": classifier_jobs(names)}
 
 
 @router.put("/config")
@@ -402,11 +421,11 @@ def create_session(request: CreateSession):
         if request.expected_config_revision != current["revision"]:
             raise HTTPException(409, "Configuration changed. Reload before creating a session.")
         if not preflight(current["config"])["can_" + request.mode]:
-            raise HTTPException(409, "Resolve the environment readiness checks (Mock or Isaac Sim). Evaluation requires a saved policy checkpoint.")
+            raise HTTPException(409, "Resolve the environment readiness checks (Mock, Isaac Sim or MuJoCo). Evaluation requires a saved policy checkpoint.")
         if any(decorate(s)["state"] != "stopped" or (_workers.get(s["id"]) is not None and _workers[s["id"]].poll() is None) for s in sessions(db)):
             raise HTTPException(409, "Stop the existing session before creating another.")
         session_config = dict(current['config'])
-        if request.mode in ('demo', 'classifier'):
+        if request.mode == 'demo':
             session_config['max_episode_steps'] = min(session_config['max_episode_steps'], session_config['collection_episode_steps'])
         session = {"id": str(uuid4()), "revision": 0, "mode": request.mode, "state": "created",
                    "config_revision": current["revision"], "config": session_config,
@@ -416,6 +435,56 @@ def create_session(request: CreateSession):
                    "events": []}
         write(db, "session:" + session["id"], session)
         return session
+
+
+class RestartTraining(StrictModel):
+    expected_revision: int = Field(ge=0)
+
+
+@router.post('/sessions/{session_id}/restart-training')
+def restart_training(session_id: str, request: RestartTraining):
+    from hilserl_resume import counters, validate_snapshot, elapsed_active
+    with database() as db:
+        source = read(db, 'session:' + artifact_id(session_id))
+        if not source:
+            raise HTTPException(404, 'Training session not found')
+        if source['revision'] != request.expected_revision:
+            raise HTTPException(409, 'Session changed; refresh before resuming')
+        status = runtime_status(source) or {}
+        if source['mode'] != 'train' or decorate(source)['state'] != 'stopped' or not status.get('artifacts_saved') or status.get('error'):
+            raise HTTPException(409, 'Wait for a successful Stop & save artifacts before resuming')
+        if any(decorate(s)['state'] != 'stopped' or (_workers.get(s['id']) is not None and _workers[s['id']].poll() is None) for s in sessions(db)):
+            raise HTTPException(409, 'Stop the existing session and wait for saving before resuming')
+        config = dict(source['config'])
+        if config.get('learning_backend') != 'hil_serl' or config.get('observation_mode') != 'pixels':
+            raise HTTPException(422, 'Full resume supports HIL-SERL image training')
+        # Replay already includes the selected demos. Do not import them twice.
+        config.update(checkpoint_path='', demonstration_path='')
+        counts = counters(status)
+        learner_dir = status.get('compute', {}).get('learner', {}).get('artifact_directory')
+        resume = {'session_id': source['id'], 'counters': counts, 'active_seconds': elapsed_active(source, status)}
+        if config.get('learner_placement', 'local') == 'remote':
+            try:
+                resume['remote_run_id'] = str(UUID(Path(learner_dir).name))
+            except (ValueError, TypeError):
+                raise HTTPException(422, 'Saved remote learner run ID is missing') from None
+        else:
+            folder = data_root() / source['id']
+            try:
+                spec = json.loads((folder / 'spec.json').read_text())
+                validate_snapshot(folder, spec)
+            except (OSError, ValueError, KeyError) as exc:
+                raise HTTPException(422, f'Cannot resume incomplete checkpoint: {exc}') from None
+            resume['learner_directory'] = str(folder)
+        if not preflight(config)['can_train']:
+            raise HTTPException(409, 'Resolve training runtime readiness before resuming')
+        item = {'id': str(uuid4()), 'revision': 0, 'mode': 'train', 'state': 'created',
+                'config_revision': source['config_revision'], 'config': config,
+                'created_at': now(), 'updated_at': now(), 'control_source': 'policy',
+                'episode': counts['episode'], 'episode_outcome': None,
+                'metrics': dict(status.get('metrics', {})), 'events': [], 'resume': resume}
+        write(db, 'session:' + item['id'], item)
+        return item
 
 
 @router.get("/sessions/{session_id}")
@@ -462,18 +531,24 @@ def command(session_id: str, request: SessionCommand):
             if state != "running" or session["control_source"] == desired:
                 raise HTTPException(409, "Control change requires a running session and a different owner")
             session["control_source"] = desired
-        elif action in {"capture_success", "capture_failure", "save_demo", "discard_demo"}:
+        elif action in {"capture_success", "capture_failure", "save_demo", "discard_demo", "discard_demo_as_failure"}:
             if state not in {'running', 'paused'}:
                 raise HTTPException(409, 'Start a collection session first')
             if action.startswith('capture_') and session['mode'] != 'classifier':
                 raise HTTPException(409, 'Use Get classifier data to capture labeled images')
-            if action in {'save_demo', 'discard_demo'}:
+            if action.startswith('capture_') and (current_status.get('runtime', {}).get('collection') or {}).get('waiting_for_intervention'):
+                raise HTTPException(409, 'Move the arm with an intervention input before capturing classifier data')
+            if action in {'save_demo', 'discard_demo', 'discard_demo_as_failure'}:
                 if session['mode'] != 'demo' or state != 'paused':
                     raise HTTPException(409, 'Pause a demonstration session before reviewing it')
                 if action == 'save_demo' and session['episode_outcome'] != 'success':
                     raise HTTPException(409, 'Label the demonstration successful before saving')
                 if not (current_status.get('runtime', {}).get('collection') or {}).get('pending_demo_steps', 0):
                     raise HTTPException(409, 'No pending demonstration to review')
+                if action == 'discard_demo_as_failure':
+                    collection = current_status['runtime']['collection']
+                    if collection.get('pending_demo_classifier_samples', 0) != collection['pending_demo_steps']:
+                        raise HTTPException(409, 'Classifier views unavailable; stop and create a new demo session')
         elif action in {"success", "failure", "truncate"}:
             allowed = {"running", "paused"} if action == "truncate" or session["mode"] in {"demo", "classifier"} else {"running"}
             if state not in allowed or session["episode_outcome"] is not None:
@@ -517,7 +592,7 @@ def manual_action(session_id: str, request: ManualAction):
             raise HTTPException(409, "Session changed")
         if not uses_runtime(item) or decorate(item).get("runtime_pending") or decorate(item)["state"] != "running":
             raise HTTPException(409, "Manual action requires a running session")
-        expected_dim = 6 if item['config']['environment'] == 'isaac_sim' else 3
+        expected_dim = 6 if item['config']['environment'] in ('isaac_sim', 'mujoco') else 3
         if len(request.value) != expected_dim:
             raise HTTPException(422, f"Expected {expected_dim} action values for this environment")
         # A short pulse expires even if the browser disappears. No ROS commands.
@@ -552,14 +627,36 @@ def isaac_frame(camera: Literal["spectator", "head", "left_wrist", "right_wrist"
         raise HTTPException(503, str(exc)) from exc
 
 
+@router.get('/mujoco/frame')
+def mujoco_frame(camera: Literal["spectator", "head", "left_wrist", "right_wrist"] = "spectator",
+                 quality: Literal["low", "standard", "high", "ultra"] = "standard"):
+    try:
+        content, headers = _mujoco.frame(camera, quality)
+        return Response(content, media_type='image/jpeg', headers=headers)
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
 class TrainClassifier(StrictModel):
     session_ids: list[str] = Field(min_length=1, max_length=32)
     epochs: int = Field(default=20, ge=1, le=200)
     seed: int = Field(default=0, ge=0)
     threshold: float = Field(default=.9, gt=0, lt=1)
+    device: str = Field(default='cuda:0', pattern=r'^(cpu|cuda:[0-9]+)$')
 
 
-def data_library():
+def collection_environment_names(stored_sessions=None):
+    from hilserl_data import environment_name
+    if stored_sessions is None:
+        with database() as db:
+            stored_sessions = sessions(db)
+    return {item['id']: environment_name(item.get('config', {})) for item in stored_sessions}
+
+
+def data_library(names=None):
+    from hilserl_data import classifier_episode_file
+    if names is None:
+        names = collection_environment_names()
     items = []
     for folder in data_root().iterdir():
         if not folder.is_dir() or folder.name == 'classifiers':
@@ -570,12 +667,22 @@ def data_library():
                 continue
             try:
                 manifest = json.loads(path.read_text())
-                item = {'session_id': folder.name, 'kind': kind, 'task': manifest['task'], 'cameras': manifest.get('cameras', ['head', 'left_wrist', 'right_wrist']),
+                item = {'session_id': folder.name, 'kind': kind, 'task': manifest['task'],
+                        'environment_name': manifest.get('environment_name') or names.get(folder.name, 'Unnamed environment'),
+                        'cameras': manifest.get('cameras', ['head', 'left_wrist', 'right_wrist']),
+                        'image_size': manifest.get('image_size', 128 if manifest.get('learning_backend') == 'hil_serl' else 64),
                         'learning_backend': manifest.get('learning_backend', 'legacy_torch'), 'camera_crops': manifest.get('camera_crops', {})}
                 if kind == 'classifier':
                     samples = manifest['samples']
                     item.update(positive=sum(x['label'] == 1 for x in samples), negative=sum(x['label'] == 0 for x in samples),
                                 episodes=len(set(x['episode'] for x in samples)))
+                    item['files'] = []
+                    for episode in sorted({sample['episode'] for sample in samples}):
+                        entries = [sample for sample in samples if sample['episode'] == episode]
+                        item['files'].append({'episode': episode,
+                                              'name': classifier_episode_file(episode) if all(sample.get('storage') == 'episode_npz_v1' for sample in entries) else None,
+                                              'positive': sum(sample['label'] == 1 for sample in entries),
+                                              'negative': sum(sample['label'] == 0 for sample in entries)})
                 else:
                     item.update(files=[{'name': f"episode-{entry['episode']:05d}.npz", 'episode': entry['episode'], 'steps': entry['steps']} for entry in manifest['episodes']],
                                 episodes=len(manifest['episodes']), steps=sum(x['steps'] for x in manifest['episodes']),
@@ -586,11 +693,17 @@ def data_library():
     return items
 
 
-def classifier_jobs():
+def classifier_jobs(names=None):
+    if names is None:
+        names = collection_environment_names()
     jobs = []
     for path in sorted((data_root() / 'classifiers').glob('*/status.json'), key=lambda p: p.stat().st_mtime, reverse=True):
         try:
             value = json.loads(path.read_text())
+            if not value.get('environment_names'):
+                request_path = path.parent / 'request.json'
+                request = json.loads(request_path.read_text()) if request_path.is_file() else {}
+                value['environment_names'] = request.get('environment_names') or sorted({names.get(identifier, 'Unnamed environment') for identifier in request.get('session_ids', [])}) or ['Unnamed environment']
             process = _classifier_workers.get(path.parent.name)
             if value.get('state') in ('queued', 'training') and (process is None or process.poll() is not None):
                 value.update(state='failed', error='Classifier worker exited or supervisor restarted')
@@ -613,22 +726,30 @@ def _start_classifier_job(request):
     task = None
     cameras = None
     learning_backend = None
+    image_size = None
     camera_crops = None
+    environment_names = set()
     positive = negative = 0
     with database() as db:
         for identifier in dict.fromkeys(request.session_ids):
             item = read(db, 'session:' + identifier)
-            if not item or item['mode'] != 'classifier' or decorate(item)['state'] != 'stopped':
-                raise HTTPException(409, 'Select stopped classifier collection sessions')
+            if not item or item['mode'] not in ('classifier', 'demo') or decorate(item)['state'] != 'stopped':
+                raise HTTPException(409, 'Select stopped sessions with classifier images')
+            worker = _workers.get(identifier)
+            if worker is not None and worker.poll() is None:
+                raise HTTPException(409, 'Wait for collection data to finish saving before training')
             path = data_root() / item['id'] / 'classifier_samples' / 'manifest.json'
             if not path.is_file():
                 raise HTTPException(422, 'Selected collection contains no labeled images')
             manifest = json.loads(path.read_text())
+            from hilserl_data import environment_name
+            environment_names.add(manifest.get('environment_name') or environment_name(item['config']))
             current_backend = manifest.get('learning_backend', 'legacy_torch')
             current_crops = manifest.get('camera_crops', {})
-            if learning_backend is not None and (learning_backend != current_backend or camera_crops != current_crops):
-                raise HTTPException(422, 'Select collections with matching resolution, model backend and camera crops; recollect legacy 64×64 data for ResNet-10')
-            learning_backend, camera_crops = current_backend, current_crops
+            current_size = manifest.get('image_size', 128 if current_backend == 'hil_serl' else 64)
+            if learning_backend is not None and (learning_backend != current_backend or camera_crops != current_crops or image_size != current_size):
+                raise HTTPException(422, 'Select collections with matching training resolution, model backend and camera crops')
+            learning_backend, camera_crops, image_size = current_backend, current_crops, current_size
             if task is not None and task != manifest['task']:
                 raise HTTPException(422, 'Collections must use the same robot, arm and target')
             task = manifest['task']
@@ -640,19 +761,21 @@ def _start_classifier_job(request):
             negative += sum(sample['label'] == 0 for sample in manifest['samples'])
             collections.append(str(path.parent.parent))
     if min(positive, negative) < 10:
-        raise HTTPException(422, 'At least 10 success and 10 failure images are required, across separate episodes')
+        raise HTTPException(422, 'At least 10 success and 10 failure images are required')
+    if not device_ready(request.device, hardware_status()):
+        raise HTTPException(503, f'Classifier device {request.device} is unavailable; enable GPU access before training')
     identifier = str(uuid4())
     folder = data_root() / 'classifiers' / identifier
     folder.mkdir(parents=True)
     spec = {**request.model_dump(), 'collections': collections, 'task': task, 'cameras': cameras,
-            'learning_backend': learning_backend, 'camera_crops': camera_crops}
+            'image_size': image_size, 'learning_backend': learning_backend, 'camera_crops': camera_crops, 'environment_names': sorted(environment_names)}
     (folder / 'request.json').write_text(json.dumps(spec))
-    (folder / 'status.json').write_text(json.dumps({'state': 'queued', 'epochs': request.epochs, 'task': task, 'cameras': cameras}))
+    (folder / 'status.json').write_text(json.dumps({'state': 'queued', 'epochs': request.epochs, 'task': task, 'cameras': cameras, 'environment_names': sorted(environment_names), 'device': request.device, 'learning_backend': learning_backend}))
     with (folder / 'worker.log').open('a') as log:
-        from hilserl_profiles import runtime_python
+        from hilserl_profiles import runtime_python, classifier_environment
         _classifier_workers[identifier] = subprocess.Popen([runtime_python(spec), str(Path(__file__).with_name('hilserl_classifier.py')), str(folder)],
                                                           stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
-                                                          env={**os.environ, 'JAX_PLATFORMS': 'cpu'} if learning_backend == 'hil_serl' else None)
+                                                          env=classifier_environment(request.device))
     return {'id': identifier, 'state': 'queued'}
 
 
@@ -664,15 +787,22 @@ def classifier_sample(session_id: str, sample_id: str):
         session_id, sample_id = str(UUID(session_id)), str(UUID(sample_id))
     except ValueError:
         raise HTTPException(422, 'Invalid sample identifier')
-    path = data_root() / session_id / 'classifier_samples' / f'{sample_id}.npz'
-    if not path.is_file():
+    folder = data_root() / session_id / 'classifier_samples'
+    if not (folder / 'manifest.json').is_file():
         raise HTTPException(404, 'Sample not found')
     import numpy as np
     import cv2
-    with np.load(path, allow_pickle=False) as data:
-        pixels = data['images']
     cameras = ['head', 'left_wrist', 'right_wrist']
-    manifest = json.loads((path.parent / 'manifest.json').read_text())
+    manifest = json.loads((folder / 'manifest.json').read_text())
+    sample = next((sample for sample in manifest['samples'] if sample['id'] == sample_id), None)
+    if sample is None:
+        raise HTTPException(404, 'Sample not found')
+    from hilserl_data import ClassifierSamples
+    try:
+        with ClassifierSamples(folder) as source:
+            pixels, _ = source.read(sample)
+    except (FileNotFoundError, KeyError):
+        raise HTTPException(404, 'Sample not found')
     selected = manifest.get('cameras', cameras)
     rgb = np.concatenate([pixels[i*3:i*3+3].transpose(1, 2, 0) for i, camera in enumerate(cameras) if camera in selected], axis=1)
     ok, jpg = cv2.imencode('.jpg', cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
@@ -768,7 +898,7 @@ def combine_demos(request: CombineDemos):
             if not manifest_path.is_file():
                 raise HTTPException(404, 'Demo manifest not found')
             manifest = json.loads(manifest_path.read_text())
-            signature = (manifest['task'], manifest.get('cameras', CAMERAS))
+            signature = (manifest['task'], manifest.get('cameras', CAMERAS), manifest.get('image_size', 128 if manifest.get('learning_backend') == 'hil_serl' else 64))
             if expected is not None and signature != expected:
                 raise HTTPException(409, 'Select demos with matching tasks and cameras')
             expected = signature
@@ -800,11 +930,12 @@ def combine_demos(request: CombineDemos):
                     raise HTTPException(422, 'Select at most 4096 steps per training export')
                 for key in arrays:
                     arrays[key].append(data[key].copy())
-        target = data_root() / 'demo_exports' / f'{uuid4()}.npz'
-        write_npz(target, **metadata, __sources__=np.array(json.dumps([s.model_dump() for s in request.selections])),
-                  **{key: np.concatenate(values) for key, values in arrays.items()})
+    # Compression is expensive; release the control database before writing the snapshot.
+    target = data_root() / 'demo_exports' / f'{uuid4()}.npz'
+    write_npz(target, **metadata, __sources__=np.array(json.dumps([s.model_dump() for s in request.selections])),
+              **{key: np.concatenate(values) for key, values in arrays.items()})
     return {'path': str(target), 'task': expected[0], 'cameras': expected[1], 'steps': actual_steps,
-            'episodes': len(paths)}
+            'episodes': len(paths), 'image_size': expected[2]}
 
 
 @router.post('/datasets/{session_id}/demo/delete-episodes')
@@ -886,6 +1017,9 @@ def delete_dataset(session_id: str, kind: Literal['classifier', 'demo']):
             raise HTTPException(404, 'Session not found')
         if decorate(item)['state'] != 'stopped':
             raise HTTPException(409, 'Stop collection before deleting its data')
+        worker = _workers.get(session_id)
+        if worker is not None and worker.poll() is None:
+            raise HTTPException(409, 'Wait for collection data to finish saving before deleting')
         folder = data_root() / session_id
         for job, worker in _classifier_workers.items():
             if worker.poll() is None:
@@ -906,6 +1040,36 @@ def delete_dataset(session_id: str, kind: Literal['classifier', 'demo']):
         item.setdefault('deleted_datasets', []).append(kind)
         write(db, 'session:' + session_id, item)
     return {'deleted': True, 'session_id': session_id, 'kind': kind}
+
+
+@router.post('/classifiers/{job_id}/stop')
+def stop_classifier(job_id: str):
+    job_id = artifact_id(job_id)
+    with _classifier_lock:
+        folder = data_root() / 'classifiers' / job_id
+        if not (folder / 'status.json').is_file():
+            raise HTTPException(404, 'Classifier job not found')
+        if folder.is_symlink():
+            raise HTTPException(422, 'Invalid classifier path')
+        previous = json.loads((folder / 'status.json').read_text())
+        if previous.get('state') in ('stopped', 'complete', 'failed'):
+            return {'id': job_id, **previous}
+        worker = _classifier_workers.get(job_id)
+        if worker is None or worker.poll() is not None:
+            raise HTTPException(409, 'Classifier worker is no longer running; refresh its status')
+        # A bounded stop also interrupts long JAX compilation/native training.
+        # Writes are atomic; only an unfinished .tmp file can be left behind.
+        worker.terminate()
+        try:
+            worker.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            worker.kill()
+            worker.wait(timeout=2)
+        latest = json.loads((folder / 'status.json').read_text())
+        if latest.get('state') in ('complete', 'failed'):
+            return {'id': job_id, **latest}
+        from hilserl_classifier_jobs import stopped_status
+        return {'id': job_id, **stopped_status(folder)}
 
 
 @router.delete('/classifiers/{job_id}')

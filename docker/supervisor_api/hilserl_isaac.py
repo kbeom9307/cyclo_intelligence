@@ -52,6 +52,9 @@ class IsaacNistEnv:
     action_dim = 6
     schema = SCHEMA
 
+    def _request(self, path, body, timeout):
+        return request(path, body, timeout)
+
     def __init__(self, config):
         self.owner = str(uuid4())
         self.sequence = -1
@@ -72,7 +75,7 @@ class IsaacNistEnv:
     def _command(self, operation, **kwargs):
         self.sequence += 1
         # No automatic retry of mutations; ambiguous network failure stops Actor.
-        result = request('/command', {'owner': self.owner, 'sequence': self.sequence,
+        result = self._request('/command', {'owner': self.owner, 'sequence': self.sequence,
                                      'operation': operation, **kwargs}, timeout=185 if operation in ('acquire', 'reset') else 28)
         self.last_heartbeat = time.monotonic()
         return result
@@ -161,14 +164,14 @@ class IsaacNistEnv:
             self._command('release')
 
 
-def frame(camera='spectator', quality='standard'):
+def frame(camera='spectator', quality='standard', *, endpoint=None):
     """Proxy a bounded cached JPEG; never enqueue a physics command."""
     if quality not in ('low', 'standard', 'high', 'ultra'):
         raise ValueError('Unknown quality')
     if camera not in ('spectator', 'head', 'left_wrist', 'right_wrist'):
         raise ValueError('Unknown camera')
     try:
-        with urlopen(bridge_url() + '/frame.jpg?camera=' + camera + '&quality=' + quality, timeout=2) as response:
+        with urlopen((endpoint or bridge_url()) + '/frame.jpg?camera=' + camera + '&quality=' + quality, timeout=2) as response:
             content = response.read(8 * 1024 * 1024 + 1)
             if len(content) > 8 * 1024 * 1024 or response.headers.get_content_type() != 'image/jpeg' or not content.startswith(b'\xff\xd8'):
                 raise ValueError('Invalid visualization frame')

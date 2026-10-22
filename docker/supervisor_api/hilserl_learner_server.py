@@ -10,7 +10,7 @@ os.environ.setdefault('XLA_PYTHON_CLIENT_MEM_FRACTION', '.90')
 from pathlib import Path
 import secrets
 import time
-from uuid import uuid4
+from uuid import uuid4, UUID
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import Response
@@ -42,13 +42,13 @@ def validate_spec(spec):
     if type(spec['pixel']) is not bool:
         raise ValueError('Invalid pixel flag')
     config = ExperimentConfig(**{'learning_backend': 'legacy_torch', **spec['config']}).model_dump()
-    expected = ((pixel_schema(config), 22, 6) if spec['pixel'] else (SCHEMA, 39, 6)) if config['environment'] == 'isaac_sim' else ('mock-xyz-state4-delta3-v1', 4, 3)
-    if (spec['schema'], spec['observation_dim'], spec['action_dim']) != expected or (spec['pixel'] and config['environment'] != 'isaac_sim'):
+    expected = ((pixel_schema(config), 22, 6) if spec['pixel'] else (SCHEMA, 39, 6)) if config['environment'] in ('isaac_sim', 'mujoco') else ('mock-xyz-state4-delta3-v1', 4, 3)
+    if (spec['schema'], spec['observation_dim'], spec['action_dim']) != expected or (spec['pixel'] and config['environment'] not in ('isaac_sim', 'mujoco')):
         raise ValueError('Incompatible observation/action schema')
     # Bound server RAM and reject arbitrary actor-side paths/credentials.
     allowed = {'environment', 'robot_type', 'arm', 'target_part', 'observation_cameras', 'seed', 'learning_rate',
                'discount', 'learner_device', 'pixel_batch_size', 'pixel_replay_capacity', 'batch_size', 'replay_capacity',
-               'learning_backend', 'cta_ratio', 'training_starts', 'policy_publish_interval', 'camera_crops'}
+               'learning_backend', 'cta_ratio', 'training_starts', 'policy_publish_interval', 'camera_crops', 'image_size'}
     if set(spec['config']) - allowed or config['replay_capacity'] > 1000000:
         raise ValueError('Unsupported learner configuration or excessive replay capacity')
     return {**spec, 'config': {key: config[key] for key in allowed}}
@@ -149,7 +149,15 @@ def create_app(root=None, token=None):
     async def start(request: Request):
         payload = await body(request)
         def begin():
-            spec = validate_spec(json.loads(payload))
+            value = json.loads(payload)
+            resume_id = value.pop('resume_run_id', None)
+            resume_counts = value.pop('resume_counts', None)
+            spec = validate_spec(value)
+            resume_folder = None
+            if resume_id:
+                resume_folder = root / str(UUID(resume_id))
+                if resume_folder.is_symlink():
+                    raise ValueError('Invalid resume directory')
             if state['active']:
                 raise HTTPException(409, 'Learner already has an active run')
             name = spec['config']['learner_device']
@@ -157,7 +165,7 @@ def create_app(root=None, token=None):
                 raise HTTPException(409, f'Remote learner device {name} is unavailable')
             torch.manual_seed(spec['config']['seed'])
             identifier = str(uuid4())
-            engine = LearnerEngine(spec, root / identifier)
+            engine = LearnerEngine(spec, root / identifier, resume_folder=resume_folder, resume_counts=resume_counts)
             state['active'] = {'id': identifier, 'engine': engine, 'heartbeat': time.monotonic(), 'sequence': -1}
             return {'run_id': identifier}
         return await execute(begin)

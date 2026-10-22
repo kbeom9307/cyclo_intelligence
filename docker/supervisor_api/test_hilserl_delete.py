@@ -126,6 +126,14 @@ def test_combine_demos_across_sessions_and_reject_mixed_tasks(tmp_path, monkeypa
         with hil.database() as db: hil.write(db,'session:'+identifier,dict(id=identifier,mode='demo',state='stopped',config=hil.ExperimentConfig().model_dump(),revision=0))
     app=FastAPI();app.include_router(hil.router)
     selections=[dict(session_id=identifier,episodes=[1]) for identifier in ids]
+    # Export compression must not hold the control DB lock: workspace polling uses it too.
+    import hilserl_data
+    original_write = hilserl_data.write_npz
+    def unlocked_write(path, **values):
+        with hil.database() as db:
+            assert hil.read(db, 'session:' + ids[0]) is not None
+        original_write(path, **values)
+    monkeypatch.setattr(hilserl_data, 'write_npz', unlocked_write)
     with TestClient(app) as client:
         result=client.post('/hilserl/datasets/demo/combine',json=dict(selections=selections))
         assert result.status_code==200,result.text
@@ -137,4 +145,6 @@ def test_combine_demos_across_sessions_and_reject_mixed_tasks(tmp_path, monkeypa
         path=tmp_path/ids[1]/'demos/manifest.json';manifest=json.loads(path.read_text());manifest['task']['arm']='left';path.write_text(json.dumps(manifest))
         assert client.post('/hilserl/datasets/demo/combine',json=dict(selections=selections)).status_code==409
         manifest['task']['arm']='right';manifest['cameras']=['right_wrist'];path.write_text(json.dumps(manifest))
+        assert client.post('/hilserl/datasets/demo/combine',json=dict(selections=selections)).status_code==409
+        manifest['cameras']=['head'];manifest['image_size']=256;path.write_text(json.dumps(manifest))
         assert client.post('/hilserl/datasets/demo/combine',json=dict(selections=selections)).status_code==409

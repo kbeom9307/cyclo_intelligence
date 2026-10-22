@@ -38,6 +38,19 @@ def test_native_resolution_and_restored_defaults():
         config(camera_crops={'head': [.8, 0, .2, 1]})
 
 
+def test_shared_mujoco_allocator_preserves_explicit_overrides(monkeypatch):
+    from hilserl_profiles import jax_memory_fraction
+    monkeypatch.delenv('XLA_PYTHON_CLIENT_MEM_FRACTION', raising=False)
+    c = config(environment='mujoco', actor_device='cuda:0', learner_device='cuda:0',
+               learner_placement='local')
+    assert jax_memory_fraction(c) == '.80'
+    assert jax_memory_fraction({**c, 'learner_placement': 'remote'}) == '.90'
+    assert jax_memory_fraction({**c, 'environment': 'isaac_sim'}) == '.90'
+    assert jax_memory_fraction({**c, 'learner_device': 'cuda:1'}) == '.90'
+    monkeypatch.setenv('XLA_PYTHON_CLIENT_MEM_FRACTION', '.95')
+    assert jax_memory_fraction(c) == '.95'
+
+
 def test_restored_actor_readiness_when_overview_leaves_too_little_vram(monkeypatch):
     import hilserl
     monkeypatch.setattr(hilserl, 'hardware_status', lambda: {'gpus': [
@@ -108,6 +121,16 @@ def test_upstream_updates_frozen_backbone_temperature_and_policy(tmp_path):
     saved = serialization.from_bytes(learner.agent.state, (tmp_path / 'learner.msgpack').read_bytes())
     np.testing.assert_array_equal(saved.rng, learner.agent.state.rng)
     assert jax.tree_util.tree_structure(saved.opt_states) == jax.tree_util.tree_structure(learner.agent.state.opt_states)
+    resumed = UpstreamSAC(c)
+    resumed.restore_training(tmp_path, {})
+    assert resumed.steps == learner.steps and resumed.critic_steps == learner.critic_steps
+    for left, right in zip(jax.tree_util.tree_leaves(resumed.agent.state), jax.tree_util.tree_leaves(learner.agent.state)):
+        np.testing.assert_array_equal(left, right)
+    # Same batch and restored RNG/optimizer must produce the same next update.
+    learner.update(batch)
+    resumed.update(batch)
+    for left, right in zip(jax.tree_util.tree_leaves(resumed.agent.state), jax.tree_util.tree_leaves(learner.agent.state)):
+        np.testing.assert_allclose(left, right, rtol=1e-6, atol=1e-7)
 
 
 @pytest.mark.skipif(os.environ.get('CYCLO_TEST_UPSTREAM_REMOTE') != '1', reason='opt-in two-process upstream transport test')
@@ -170,6 +193,23 @@ def test_remote_upstream_demos_updates_and_checkpoints(tmp_path):
         folder = tmp_path / 'server' / metadata['run_id']
         assert (folder / 'learner.msgpack').is_file() and (folder / 'policy.npz').is_file()
         assert json.loads((folder / 'replay/demonstrations/index.json').read_text())['size'] == 2
+        saved_counts = metadata['metrics']
+        resumed = AsyncLearner(c, make_spec(c, env), tmp_path / 'resumed-actor', None, [],
+            resume={'remote_run_id': metadata['run_id'], 'counters': saved_counts})
+        initial = resumed.snapshot()[0]['metrics']
+        assert initial['learner_steps'] == saved_counts['learner_steps']
+        assert initial['critic_steps'] == saved_counts['critic_steps']
+        assert initial['replay_size'] == saved_counts['replay_size']
+        assert initial['demo_replay_size'] == 2
+        resumed.tick(True)
+        deadline = time.monotonic() + 180
+        while resumed.snapshot()[0]['metrics']['learner_steps'] <= saved_counts['learner_steps']:
+            if time.monotonic() > deadline:
+                pytest.fail('Resumed learner did not continue updating')
+            time.sleep(.1)
+        continued, _ = resumed.close()
+        assert continued['run_id'] != metadata['run_id']
+        assert json.loads((folder / 'learner-state.json').read_text())['learner_steps'] == saved_counts['learner_steps']
         assert not (tmp_path / 'actor/learner.msgpack').exists()
     finally:
         if backend:
@@ -177,3 +217,27 @@ def test_remote_upstream_demos_updates_and_checkpoints(tmp_path):
         server.terminate()
         server.wait(timeout=30)
         log.close()
+
+
+def test_upstream_sac_preserves_original_update_metrics_without_gpu(monkeypatch):
+    from types import SimpleNamespace
+    import hilserl_upstream as upstream
+    monkeypatch.setattr(upstream.jax, 'device_get', lambda value: value)
+    critic = {'critic_loss': .1, 'predicted_qs': .2, 'target_qs': .3, 'rewards': .4}
+    actor = {'actor_loss': .5, 'temperature': .6, 'entropy': .7}
+    class Agent:
+        state = SimpleNamespace(params={'modules_actor': {'weight': 1}})
+        def update(self, batch, networks_to_update):
+            assert batch == ['row']
+            return self, {'critic': critic, **({} if networks_to_update == frozenset({'critic'}) else {
+                'actor': actor, 'temperature': {'temperature_loss': .8}})}
+    learner = upstream.UpstreamSAC.__new__(upstream.UpstreamSAC)
+    learner.agent = Agent()
+    learner.batch = lambda rows: rows
+    learner.policy = SimpleNamespace(params={})
+    learner.steps = learner.critic_steps = 0
+    result = learner.update(['row'])
+    assert result == {**critic, **actor, 'temperature_loss': .8, 'critic_steps': 1}
+    result = learner.update(['row'], critic_only=True)
+    assert result == {**critic, 'critic_steps': 2}
+    assert learner.steps == 1

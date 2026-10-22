@@ -1,0 +1,618 @@
+{
+  "date": "2026-10-20",
+  "gpu": "NVIDIA GeForce RTX 5070 Laptop GPU",
+  "physical_vram_mib": 8151,
+  "framework": "pinned HIL-SERL JAX/Flax, FP32, ResNet-10",
+  "configuration": {
+    "environment": "mujoco",
+    "robot": "ffw_sg2_rev1",
+    "learning_image_shape": [
+      9,
+      128,
+      128
+    ],
+    "proprioception_dim": 22,
+    "action_dim": 6,
+    "batch_size": 256,
+    "cta_ratio": 2,
+    "replay_capacity_per_bank": 200000,
+    "training_starts": 100,
+    "policy_publish_interval": 50,
+    "actor_device": "cuda:0",
+    "learner_device": "cuda:0",
+    "learner_placement": "local",
+    "requested_control_hz": 20,
+    "overview_resolution": [
+      1920,
+      1440
+    ],
+    "robot_camera_resolutions": [
+      640,
+      360
+    ]
+  },
+  "selected_default": {
+    "xla_preallocate": false,
+    "xla_memory_fraction": 0.8,
+    "convolution_autotuning": true,
+    "local_replay_ingestion": "separate from optimizer; bounded queue and lossless drain at stop",
+    "required_free_mib_before_start": 6656
+  },
+  "result": "Local all-in-one execution passes at batch 256; actor does not sustain the requested 20 Hz.",
+  "runs": [
+    {
+      "run": "default",
+      "state": "failed",
+      "description": "Original single-threaded replay/update path; queue filled during first compilation.",
+      "batch_size": 256,
+      "cta_ratio": 2,
+      "policy_publish_interval": 1,
+      "memory_fraction": ".90",
+      "xla_flags": "",
+      "peak_total_gpu_mib": 7554.0,
+      "minimum_free_gpu_mib": 153.0,
+      "elapsed_s": 61.582,
+      "last_running_metrics": {
+        "learner_steps": 1,
+        "replay_size": 355,
+        "demo_replay_size": 32,
+        "replay_ready": true,
+        "environment_steps": 355,
+        "policy_version": 1,
+        "human_steps": 0,
+        "success_rate": 0.0,
+        "completed_episodes": 1,
+        "critic_loss": 17.435701370239258,
+        "actor_loss": 3.6705806255340576,
+        "temperature": 0.009997790679335594,
+        "critic_steps": 2
+      },
+      "final_metrics": {
+        "learner_steps": 1,
+        "replay_size": 355,
+        "demo_replay_size": 32,
+        "replay_ready": true,
+        "environment_steps": 355,
+        "policy_version": 1,
+        "human_steps": 0,
+        "success_rate": 0.0,
+        "completed_episodes": 1,
+        "critic_loss": 17.435701370239258,
+        "actor_loss": 3.6705806255340576,
+        "temperature": 0.009997790679335594,
+        "critic_steps": 2
+      },
+      "actor_timing": {
+        "effective_hz": 12.904190809964616,
+        "median_step_ms": 50.76611042022705,
+        "p95_step_ms": 121.12029790878289,
+        "max_gap_s": 2.0475211143493652
+      },
+      "warm_learner_cta_pair_median_s": null,
+      "warm_actor_after_third_update_hz": null,
+      "maximum_pending_transitions": 256,
+      "changed_policy_arrays": 31,
+      "replay_counts": null,
+      "transition_count": 355,
+      "artifacts_bytes": {
+        "policy.npz": 31678806,
+        "learner.msgpack": 291180500,
+        "replay/online/index.json": 84,
+        "replay/demonstrations/index.json": 82
+      },
+      "camera_frames": {
+        "spectator": {
+          "ok": 210,
+          "unavailable": 2,
+          "max_latency_ms": 15.258268977049738
+        },
+        "head": {
+          "ok": 210,
+          "unavailable": 2,
+          "max_latency_ms": 12.321651971433312
+        },
+        "left_wrist": {
+          "ok": 210,
+          "unavailable": 2,
+          "max_latency_ms": 14.388577954377979
+        },
+        "right_wrist": {
+          "ok": 210,
+          "unavailable": 2,
+          "max_latency_ms": 14.802885998506099
+        }
+      },
+      "error": "RuntimeError: Traceback (most recent call last):\n  File \"/opt/supervisor_api/hilserl_runtime.py\", line 427, in <module>\n    run(root, session_id, int(sys.argv[3]) if len(sys.argv) > 3 else None)\n  File \"/opt/supervisor_api/hilserl_runtime.py\", line 110, in run\n    train(root, session_id, parent, folder, config, env, session)\n  File \"/opt/supervisor_api/hilserl_runtime.py\", line 325, in train\n    backend.insert(row)\n  File \"/opt/supervisor_api/hilserl_learner.py\", line 215, in insert\n    raise RuntimeError('Learner connection cannot keep up: transition queue is full (256); session stopped without dropping queued data')\nRuntimeError: Learner connection cannot keep up: transition queue is full (256); session stopped without dropping queued data\n"
+    },
+    {
+      "run": "fixed",
+      "state": "passed",
+      "description": "Replay reception separated from optimizer; original 90% allocator.",
+      "batch_size": 256,
+      "cta_ratio": 2,
+      "policy_publish_interval": 1,
+      "memory_fraction": ".90",
+      "xla_flags": "",
+      "peak_total_gpu_mib": 7562.0,
+      "minimum_free_gpu_mib": 145.0,
+      "elapsed_s": 92.972,
+      "last_running_metrics": {
+        "learner_steps": 10,
+        "replay_size": 1010,
+        "demo_replay_size": 32,
+        "replay_ready": true,
+        "critic_loss": 0.1544078290462494,
+        "actor_loss": 1.9590743780136108,
+        "temperature": 0.009961426258087158,
+        "critic_steps": 20,
+        "environment_steps": 1011,
+        "policy_version": 9,
+        "human_steps": 0,
+        "success_rate": 0.0,
+        "completed_episodes": 5
+      },
+      "final_metrics": {
+        "learner_steps": 11,
+        "replay_size": 1011,
+        "demo_replay_size": 32,
+        "replay_ready": true,
+        "critic_loss": 0.06236109882593155,
+        "actor_loss": 1.9747660160064697,
+        "temperature": 0.009956805035471916,
+        "critic_steps": 22,
+        "environment_steps": 1012,
+        "policy_version": 11,
+        "human_steps": 0,
+        "success_rate": 0.0,
+        "completed_episodes": 5
+      },
+      "actor_timing": {
+        "effective_hz": 14.784648630198785,
+        "median_step_ms": 50.52900314331055,
+        "p95_step_ms": 86.67528629302979,
+        "max_gap_s": 1.8416805267333984
+      },
+      "warm_learner_cta_pair_median_s": 0.507,
+      "warm_actor_after_third_update_hz": 4.598,
+      "maximum_pending_transitions": 1,
+      "changed_policy_arrays": 31,
+      "replay_counts": null,
+      "transition_count": 1012,
+      "artifacts_bytes": {
+        "policy.npz": 31683994,
+        "learner.msgpack": 291180500,
+        "replay/online/index.json": 86,
+        "replay/demonstrations/index.json": 82
+      },
+      "camera_frames": {
+        "spectator": {
+          "ok": 335,
+          "unavailable": 2,
+          "max_latency_ms": 13.890760950744152,
+          "fresh_frames": 273,
+          "max_age_ms": 313.0
+        },
+        "head": {
+          "ok": 335,
+          "unavailable": 2,
+          "max_latency_ms": 12.883293034974486,
+          "fresh_frames": 273,
+          "max_age_ms": 324.0
+        },
+        "left_wrist": {
+          "ok": 335,
+          "unavailable": 2,
+          "max_latency_ms": 10.671283002011478,
+          "fresh_frames": 273,
+          "max_age_ms": 316.0
+        },
+        "right_wrist": {
+          "ok": 335,
+          "unavailable": 2,
+          "max_latency_ms": 12.939715990796685,
+          "fresh_frames": 273,
+          "max_age_ms": 317.0
+        }
+      },
+      "error": null
+    },
+    {
+      "run": "pool70",
+      "state": "failed",
+      "description": "70% allocator with autotuning; failed to allocate a contiguous 2064 MiB block.",
+      "batch_size": 256,
+      "cta_ratio": 2,
+      "policy_publish_interval": 1,
+      "memory_fraction": ".70",
+      "xla_flags": "",
+      "peak_total_gpu_mib": 4712.0,
+      "minimum_free_gpu_mib": 2995.0,
+      "elapsed_s": 54.104,
+      "last_running_metrics": {
+        "learner_steps": 0,
+        "replay_size": 480,
+        "demo_replay_size": 32,
+        "replay_ready": true,
+        "environment_steps": 481,
+        "policy_version": 0,
+        "human_steps": 0,
+        "success_rate": 0.0,
+        "completed_episodes": 2
+      },
+      "final_metrics": {
+        "learner_steps": 0,
+        "replay_size": 480,
+        "demo_replay_size": 32,
+        "replay_ready": true,
+        "environment_steps": 481,
+        "policy_version": 0,
+        "human_steps": 0,
+        "success_rate": 0.0,
+        "completed_episodes": 2
+      },
+      "actor_timing": {
+        "effective_hz": 15.960497650604784,
+        "median_step_ms": 50.3765344619751,
+        "p95_step_ms": 82.72371292114256,
+        "max_gap_s": 1.941795825958252
+      },
+      "warm_learner_cta_pair_median_s": null,
+      "warm_actor_after_third_update_hz": null,
+      "maximum_pending_transitions": 1,
+      "changed_policy_arrays": 0,
+      "replay_counts": null,
+      "transition_count": 481,
+      "artifacts_bytes": {
+        "policy.npz": 31668953,
+        "learner.msgpack": 291180500,
+        "replay/online/index.json": 84,
+        "replay/demonstrations/index.json": 82
+      },
+      "camera_frames": {
+        "spectator": {
+          "ok": 180,
+          "unavailable": 2,
+          "max_latency_ms": 10.288823978044093,
+          "fresh_frames": 147,
+          "max_age_ms": 302.0
+        },
+        "head": {
+          "ok": 180,
+          "unavailable": 2,
+          "max_latency_ms": 10.432141018100083,
+          "fresh_frames": 147,
+          "max_age_ms": 302.0
+        },
+        "left_wrist": {
+          "ok": 180,
+          "unavailable": 2,
+          "max_latency_ms": 10.343082016333938,
+          "fresh_frames": 147,
+          "max_age_ms": 313.0
+        },
+        "right_wrist": {
+          "ok": 180,
+          "unavailable": 2,
+          "max_latency_ms": 10.898825014010072,
+          "fresh_frames": 147,
+          "max_age_ms": 326.0
+        }
+      },
+      "error": "RuntimeError: Traceback (most recent call last):\n  File \"/opt/supervisor_api/hilserl_runtime.py\", line 278, in train\n    learner_status, weights = backend.snapshot()\n                              ^^^^^^^^^^^^^^^^^^\n  File \"/opt/supervisor_api/hilserl_learner.py\", line 305, in snapshot\n    self.check()\n  File \"/opt/supervisor_api/hilserl_learner.py\", line 273, in check\n    raise RuntimeError(self.error)\nRuntimeError: XlaRuntimeError: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 2164371080 bytes.\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"/opt/supervisor_api/hilserl_runtime.py\", line 427, in <module>\n    run(root, session_id, int(sys.argv[3]) if len(sys.argv) > 3 else None)\n  File \"/opt/supervisor_api/hilserl_runtime.py\", line 110, in run\n    train(root, session_id, parent, folder, config, env, session)\n  File \"/opt/supervisor_api/hilserl_runtime.py\", line 420, in train\n    raise final_error\n  File \"/opt/supervisor_api/hilserl_runtime.py\", line 403, in train\n    learner_status, weights = backend.close(env.heartbeat)\n                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/supervisor_api/hilserl_learner.py\", line 319, in close\n    self.check()\n  File \"/opt/supervisor_api/hilserl_learner.py\", line 273, in check\n    raise RuntimeError(self.error)\nRuntimeError: XlaRuntimeError: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 2164371080 bytes.\n"
+    },
+    {
+      "run": "pool70-noautotune",
+      "state": "passed",
+      "description": "70% allocator with autotuning disabled; executes but causes long actor stalls.",
+      "batch_size": 256,
+      "cta_ratio": 2,
+      "policy_publish_interval": 1,
+      "memory_fraction": ".70",
+      "xla_flags": "--xla_gpu_autotune_level=0",
+      "peak_total_gpu_mib": 5734.0,
+      "minimum_free_gpu_mib": 1973.0,
+      "elapsed_s": 233.973,
+      "last_running_metrics": {
+        "learner_steps": 10,
+        "replay_size": 1230,
+        "demo_replay_size": 32,
+        "replay_ready": true,
+        "critic_loss": 0.16627894341945648,
+        "actor_loss": 1.9728503227233887,
+        "temperature": 0.009959101676940918,
+        "critic_steps": 20,
+        "environment_steps": 1231,
+        "policy_version": 9,
+        "human_steps": 0,
+        "success_rate": 0.0,
+        "completed_episodes": 6
+      },
+      "final_metrics": {
+        "learner_steps": 11,
+        "replay_size": 1232,
+        "demo_replay_size": 32,
+        "replay_ready": true,
+        "critic_loss": 0.06750238686800003,
+        "actor_loss": 1.9990293979644775,
+        "temperature": 0.009954405017197132,
+        "critic_steps": 22,
+        "environment_steps": 1232,
+        "policy_version": 11,
+        "human_steps": 0,
+        "success_rate": 0.0,
+        "completed_episodes": 6
+      },
+      "actor_timing": {
+        "effective_hz": 6.034884884051143,
+        "median_step_ms": 50.453901290893555,
+        "p95_step_ms": 70.72329521179199,
+        "max_gap_s": 12.65802264213562,
+        "after_first_update_hz": 3.8154481320726124
+      },
+      "warm_learner_cta_pair_median_s": 12.774,
+      "warm_actor_after_third_update_hz": 0.19,
+      "maximum_pending_transitions": 1,
+      "changed_policy_arrays": 31,
+      "replay_counts": null,
+      "transition_count": 1232,
+      "artifacts_bytes": {
+        "policy.npz": 31683636,
+        "learner.msgpack": 291180500,
+        "replay/online/index.json": 86,
+        "replay/demonstrations/index.json": 82
+      },
+      "camera_frames": {
+        "spectator": {
+          "ok": 899,
+          "unavailable": 2,
+          "max_latency_ms": 23.6045170458965,
+          "fresh_frames": 729,
+          "max_age_ms": 316.0
+        },
+        "head": {
+          "ok": 898,
+          "unavailable": 3,
+          "max_latency_ms": 24.34440399520099,
+          "fresh_frames": 728,
+          "max_age_ms": 315.0
+        },
+        "left_wrist": {
+          "ok": 899,
+          "unavailable": 2,
+          "max_latency_ms": 24.079126014839858,
+          "fresh_frames": 729,
+          "max_age_ms": 312.0
+        },
+        "right_wrist": {
+          "ok": 898,
+          "unavailable": 3,
+          "max_latency_ms": 23.265825991984457,
+          "fresh_frames": 728,
+          "max_age_ms": 314.0
+        }
+      },
+      "error": null
+    },
+    {
+      "run": "pool80",
+      "state": "passed",
+      "description": "80% allocator with autotuning retained; ten-update comparison.",
+      "batch_size": 256,
+      "cta_ratio": 2,
+      "policy_publish_interval": 1,
+      "memory_fraction": ".80",
+      "xla_flags": "",
+      "peak_total_gpu_mib": 6792.0,
+      "minimum_free_gpu_mib": 915.0,
+      "elapsed_s": 92.635,
+      "last_running_metrics": {
+        "learner_steps": 10,
+        "replay_size": 1007,
+        "demo_replay_size": 32,
+        "replay_ready": true,
+        "critic_loss": 0.11079856008291245,
+        "actor_loss": 1.9499891996383667,
+        "temperature": 0.009958728216588497,
+        "critic_steps": 20,
+        "environment_steps": 1008,
+        "policy_version": 10,
+        "human_steps": 0,
+        "success_rate": 0.0,
+        "completed_episodes": 5
+      },
+      "final_metrics": {
+        "learner_steps": 12,
+        "replay_size": 1009,
+        "demo_replay_size": 32,
+        "replay_ready": true,
+        "critic_loss": 0.07937319576740265,
+        "actor_loss": 1.5830559730529785,
+        "temperature": 0.009949070401489735,
+        "critic_steps": 24,
+        "environment_steps": 1009,
+        "policy_version": 12,
+        "human_steps": 0,
+        "success_rate": 0.0,
+        "completed_episodes": 5
+      },
+      "actor_timing": {
+        "effective_hz": 14.728280914202328,
+        "median_step_ms": 50.44412612915039,
+        "p95_step_ms": 86.802339553833,
+        "max_gap_s": 2.250861883163452,
+        "after_first_update_hz": 15.364257429732115
+      },
+      "warm_learner_cta_pair_median_s": 0.506,
+      "warm_actor_after_third_update_hz": 4.794,
+      "maximum_pending_transitions": 1,
+      "changed_policy_arrays": 31,
+      "replay_counts": {
+        "online": 1009,
+        "demonstrations": 32
+      },
+      "transition_count": 1009,
+      "artifacts_bytes": {
+        "policy.npz": 31683636,
+        "learner.msgpack": 291180500,
+        "replay/online/index.json": 86,
+        "replay/demonstrations/index.json": 82
+      },
+      "camera_frames": {
+        "spectator": {
+          "ok": 334,
+          "unavailable": 2,
+          "max_latency_ms": 14.333312981761992,
+          "fresh_frames": 273,
+          "max_age_ms": 301.0
+        },
+        "head": {
+          "ok": 334,
+          "unavailable": 2,
+          "max_latency_ms": 12.987162976060063,
+          "fresh_frames": 273,
+          "max_age_ms": 316.0
+        },
+        "left_wrist": {
+          "ok": 334,
+          "unavailable": 2,
+          "max_latency_ms": 10.648816009052098,
+          "fresh_frames": 273,
+          "max_age_ms": 315.0
+        },
+        "right_wrist": {
+          "ok": 334,
+          "unavailable": 2,
+          "max_latency_ms": 13.171633996535093,
+          "fresh_frames": 273,
+          "max_age_ms": 332.0
+        }
+      },
+      "error": null
+    },
+    {
+      "run": "final",
+      "state": "passed",
+      "description": "New default settings, original publication interval 50; requested 50 updates, then graceful stop.",
+      "batch_size": 256,
+      "cta_ratio": 2,
+      "policy_publish_interval": 50,
+      "memory_fraction": ".80",
+      "xla_flags": "",
+      "peak_total_gpu_mib": 6792.0,
+      "minimum_free_gpu_mib": 915.0,
+      "elapsed_s": 112.377,
+      "last_running_metrics": {
+        "learner_steps": 50,
+        "replay_size": 1158,
+        "demo_replay_size": 32,
+        "replay_ready": true,
+        "critic_loss": 0.0016921842470765114,
+        "actor_loss": 2.0667810440063477,
+        "temperature": 0.009776291437447071,
+        "critic_steps": 100,
+        "environment_steps": 1159,
+        "policy_version": 50,
+        "human_steps": 0,
+        "success_rate": 0.0,
+        "completed_episodes": 5
+      },
+      "final_metrics": {
+        "learner_steps": 51,
+        "replay_size": 1160,
+        "demo_replay_size": 32,
+        "replay_ready": true,
+        "critic_loss": 0.0019153535831719637,
+        "actor_loss": 2.068984031677246,
+        "temperature": 0.009771936573088169,
+        "critic_steps": 102,
+        "environment_steps": 1160,
+        "policy_version": 51,
+        "human_steps": 0,
+        "success_rate": 0.0,
+        "completed_episodes": 5
+      },
+      "actor_timing": {
+        "effective_hz": 13.245150629418154,
+        "median_step_ms": 50.59480667114258,
+        "p95_step_ms": 226.0149240493774,
+        "max_gap_s": 1.5162639617919922,
+        "after_first_update_hz": 12.379124289045025
+      },
+      "warm_learner_cta_pair_median_s": 0.507,
+      "warm_actor_after_third_update_hz": 6.792,
+      "maximum_pending_transitions": 1,
+      "changed_policy_arrays": 31,
+      "replay_counts": {
+        "online": 1160,
+        "demonstrations": 32
+      },
+      "transition_count": 1160,
+      "artifacts_bytes": {
+        "policy.npz": 31683378,
+        "learner.msgpack": 291180500,
+        "replay/online/index.json": 86,
+        "replay/demonstrations/index.json": 82
+      },
+      "camera_frames": {
+        "spectator": {
+          "ok": 412,
+          "unavailable": 2,
+          "max_latency_ms": 26.34842396946624,
+          "fresh_frames": 335,
+          "max_age_ms": 322.0
+        },
+        "head": {
+          "ok": 412,
+          "unavailable": 2,
+          "max_latency_ms": 23.98724399972707,
+          "fresh_frames": 335,
+          "max_age_ms": 325.0
+        },
+        "left_wrist": {
+          "ok": 412,
+          "unavailable": 2,
+          "max_latency_ms": 28.329658962320536,
+          "fresh_frames": 335,
+          "max_age_ms": 308.0
+        },
+        "right_wrist": {
+          "ok": 412,
+          "unavailable": 2,
+          "max_latency_ms": 22.231338021811098,
+          "fresh_frames": 335,
+          "max_age_ms": 305.0
+        }
+      },
+      "error": null
+    }
+  ],
+  "regression_tests": {
+    "passed": 56,
+    "skipped": 28,
+    "note": "Hardware opt-in tests skipped in unit suite; full GPU runs are recorded above."
+  },
+  "source_sha256": {
+    "hilserl_learner.py": "f9874afa1e62e914a8a4273b11c5e3e81a53d67fac092220d2d85bd518095e71",
+    "hilserl_profiles.py": "1bf0031b4c32196effefbdc8b8004fe74b8444a7764eebad142aafc68a2b035a",
+    "hilserl_runtime.py": "7bed16d2b686176c4065890f72e70763e425701f10fea0e61c0f7b7e41bec68a",
+    "profile_hilserl_mujoco_local.py": "d22be473aef53fd380d7dc640d19f6817f939d7ef6305c074e4682f4a1fd0b30"
+  },
+  "workspace_after_test": {
+    "revision": 11,
+    "learner_placement": "remote",
+    "active_sessions": 0,
+    "user_datasets_modified": false,
+    "test_data": "temporary directories removed after each run"
+  },
+  "notes": [
+    "GPU figures are total nvidia-smi usage, including the simulator, all four views, actor, classifier, learner and background baseline.",
+    "Used plus free does not equal physical total because approximately 444 MiB is driver-reserved.",
+    "Actor and learner share one JAX allocator in local mode; their reported memory figures must not be added together.",
+    "All tests use actual synchronized MuJoCo camera pixels. Scripted hold demonstrations and a constant-negative classifier exercise compute, not training quality or success accuracy.",
+    "The first five runs publish every update for comparison. The final run uses the original publication interval 50.",
+    "A graceful stop finishes an in-flight learner update, so final steps can exceed the requested target by one.",
+    "Learner update timings are inferred from half-second status sampling after update three and include the configured CTA 2 cycle.",
+    "Camera unavailable counts are initial renderer warmup. Frame age and fresh-frame counts are measured from the deployed Lab camera API.",
+    "This is a short integrated execution test, not a long-run training or insertion-success benchmark."
+  ]
+}
