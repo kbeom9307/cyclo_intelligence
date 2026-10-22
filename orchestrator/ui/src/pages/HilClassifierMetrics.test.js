@@ -24,3 +24,8 @@ test('does not invent history or metrics before the first epoch',()=>{
   expect(within(screen.getByRole('table')).getAllByRole('row')).toHaveLength(2);
   expect(screen.getAllByText('—').length).toBeGreaterThan(0);
 });
+test('shows F0.5 selection and the recorded score for new jobs',()=>{
+  render(<HilClassifierMetrics job={{epoch:1,best_epoch:1,checkpoint_selection:'validation_f0_5_precision_loss_v1',history:[{epoch:1,f0_5:.923,precision:1,recall:.7}]}} />);
+  expect(screen.getByText(/Highest validation F0.5/)).toBeInTheDocument();
+  expect(within(screen.getByRole('table')).getByText('92.3%')).toBeInTheDocument();
+});

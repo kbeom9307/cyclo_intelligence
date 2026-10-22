@@ -525,7 +525,7 @@ Workflow in Lab:
    releases its device memory and preserves dataset files, history and the
    last completed atomic checkpoint. Stopped jobs can use that checkpoint;
    stopping before the first checkpoint leaves no model to select.
-   The best validation balanced-accuracy epoch is saved (validation loss breaks ties),
+   New jobs save the highest validation F0.5 epoch (higher precision, then lower validation loss break ties). F0.5 = 5TP / (5TP + 4FP + FN), with zero for an empty denominator; the selection criterion is recorded in job metadata. Existing checkpoints retain their previous selection criterion,
    rather than unconditionally saving the last epoch. Poor generalization is flagged. **Use classifier** fills
    the setup fields; Save configuration to use it. The reward source `classifier`
    runs this image CNN online, requires a configured probability threshold for

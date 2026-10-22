@@ -106,6 +106,10 @@ def test_classifier_training_has_global_label_stratified_validation(tmp_path, co
         assert all(path.read_bytes() == data for path, data in originals.items())
     status = json.loads((folder/'status.json').read_text())
     assert status['state']=='complete'
+    from hilserl_classifier import checkpoint_score
+    assert status['checkpoint_selection'] == 'validation_f0_5_precision_loss_v1'
+    assert status['best_epoch'] == max(status['history'], key=checkpoint_score)['epoch']
+    assert status['checkpoint_metrics']['f0_5'] == status['best_metrics']['f0_5']
     assert status['excluded_conflicting_samples'] == (3 if conflict_scope else 0)
     if conflict_scope:
         assert any('Automatically excluded 3 samples' in warning for warning in status['warnings'])
@@ -300,3 +304,19 @@ def test_conflict_exclusion_reports_insufficient_remaining_data(tmp_path):
     assert status['excluded_conflicting_samples'] == 2
     assert len(json.loads((folder / 'excluded_samples.json').read_text())['samples']) == 2
     assert not (folder / 'classifier.npz').exists()
+
+
+def test_f0_5_checkpoint_prefers_precision_over_balanced_accuracy():
+    from hilserl_classifier import metrics, checkpoint_score
+    labels = np.array([1] * 10 + [0] * 10)
+    # Broad detector: TP=10, FP=2, BA=.9; conservative: TP=7, FP=0, BA=.85.
+    broad = metrics(np.array([.9] * 12 + [.1] * 8), labels, .5)
+    conservative = metrics(np.array([.9] * 7 + [.1] * 13), labels, .5)
+    assert conservative['balanced_accuracy'] < broad['balanced_accuracy']
+    assert conservative['f0_5'] == pytest.approx(35 / 38)
+    assert checkpoint_score(conservative) > checkpoint_score(broad)
+    empty = metrics(np.zeros(20), labels, .5)
+    assert empty['f0_5'] == 0
+    base = dict(f0_5=.9, precision=.95, validation_loss=.2)
+    assert checkpoint_score(base) > checkpoint_score({**base, 'precision': .9, 'validation_loss': .1})
+    assert checkpoint_score(base) > checkpoint_score({**base, 'validation_loss': .3})

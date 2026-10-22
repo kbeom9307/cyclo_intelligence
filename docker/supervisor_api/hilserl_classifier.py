@@ -51,9 +51,14 @@ def metrics(probabilities, labels, threshold):
     recall = tp / max(1, tp + fn)
     p = np.clip(probabilities, 1e-7, 1 - 1e-7)
     return {'precision': tp / max(1, tp + fp), 'recall': recall,
+            'f0_5': 5 * tp / max(1, 5 * tp + 4 * fp + fn),
             'balanced_accuracy': .5 * (recall + tn / max(1, tn + fp)),
             'tp': tp, 'tn': tn, 'fp': fp, 'fn': fn,
             'validation_loss': float(-(labels * np.log(p) + (1-labels) * np.log(1-p)).mean())}
+
+
+def checkpoint_score(measured):
+    return (measured['f0_5'], measured['precision'], -measured['validation_loss'])
 
 
 def fixed_batch_logits(model, images, ids, batch_size, progress=None):
@@ -112,7 +117,8 @@ def train(folder):
                                          'samples': excluded}))
     status(folder, excluded_conflicting_samples=len(excluded),
            conflicting_image_groups=len(conflicts),
-           excluded_samples_path=str(exclusion_path), warnings=warnings)
+           excluded_samples_path=str(exclusion_path), warnings=warnings,
+           checkpoint_selection='validation_f0_5_precision_loss_v1')
     images, labels, groups, hashes, sample_keys = [], [], [], {}, []
     loaded = 0
     for directory, manifest in manifests:
@@ -187,7 +193,7 @@ def train(folder):
            validation_split=split['method'], split_path=str(folder / 'split.json'),
            train_positive_samples=int(labels[train_ids].sum()), validation_positive_samples=int(labels[valid_ids].sum()),
            train_groups=sorted(set(groups[i] for i in train_ids)), validation_groups=sorted(set(groups[i] for i in valid_ids)))
-    best_score = (-1., float('-inf'))
+    best_score = (-1., -1., float('-inf'))
     best = None
     history = []
     path = folder / 'classifier.npz'
@@ -224,7 +230,7 @@ def train(folder):
                   'train_balanced_accuracy': train_metrics['balanced_accuracy'],
                   'training_seconds': round(training_seconds, 3), 'evaluation_seconds': round(validation_seconds, 3)}
         history.append(record)
-        score = (measured['balanced_accuracy'], -measured['validation_loss'])
+        score = checkpoint_score(measured)
         if score > best_score:
             progress.update('Saving checkpoint', 0, 1)
             best_score = score
